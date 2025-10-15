@@ -184,4 +184,3 @@ class TestAdresseImposition:
         """Test qu'une adresse vide est invalide."""
         adresse = AdresseImposition()
         assert adresse.is_ok_28() is False
-
