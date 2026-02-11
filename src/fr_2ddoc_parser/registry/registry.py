@@ -18,12 +18,12 @@ class TypeInfo:
 
 class TypeRegistry:
     def __init__(self):
-        self._handlers: Dict[str, tuple[TypeHandler, name]] = {}
+        self._handlers: Dict[str, tuple[TypeHandler, str]] = {}
 
     def register(self, code: str, handler: TypeHandler, name: str):
-        self._handlers[code.upper()] = [handler, name]
+        self._handlers[code.upper()] = (handler, name)
 
-    def get(self, code: str) -> Optional[tuple[TypeHandler, name: str]]:
+    def get(self, code: str) -> Optional[tuple[TypeHandler, str]]:
         return self._handlers.get(code.upper())
 
 

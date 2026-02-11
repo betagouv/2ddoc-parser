@@ -35,17 +35,7 @@ class AvisImpositionV1(BaseModel):
     @classmethod
     def from_decoded(cls, d: Decoded2DDoc) -> "AvisImpositionV1":
         f = d.fields
-        known = {
-            "41",
-            "43",
-            "44",
-            "45",
-            "46",
-            "47",
-            "48",
-            "49",
-            "4A"
-        }
+        known = {"41", "43", "44", "45", "46", "47", "48", "49", "4A"}
 
         extras = {k: v for k, v in f.items() if k not in known}
 
