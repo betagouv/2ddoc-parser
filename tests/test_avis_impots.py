@@ -7,6 +7,7 @@ from datetime import date
 from decimal import Decimal
 
 from fr_2ddoc_parser.api import decode_2d_doc
+from fr_2ddoc_parser.type.doc04_avis_impots import AvisImpositionV1
 from fr_2ddoc_parser.type.doc28_avis_impots import AvisImposition, AdresseImposition
 from fr_2ddoc_parser.exception.exceptions import TwoDDocFormatError
 
@@ -17,7 +18,11 @@ class TestAvisImpots:
     @pytest.fixture
     def sample_2d_doc(self):
         """Fixture avec un 2D-DOC d'avis d'impôts réel."""
-        return "DC04FR000001FFFF23DC2801FR432,75<GS>44227801234567845202146RETI PATRICK<GS>4A310720224Y145 RUE JULLIARD/ZASPECIMEN/78320/LEVIS STNOM<GS>4163198<GS>47300112345678948RETISOPHIE<GS>4907019877654324V3542<GS>4W182<GS>4X3724<GS><US>6W76EBC3I2LWHBVGNNYTL34SC6V32S2GDCIQQZLZNMTKCHNVEUISJYUQH5WE3AJJICBNG3YMQ2NXXHP5ZHVOQE332R6TUJDHNOHQ6BI"
+        return "DC04FR000001000F23DC2801FR432,75<GS>44227801234567845202146RETI PATRICK<GS>4A310720224Y145 RUE JULLIARD/ZASPECIMEN/78320/LEVIS STNOM<GS>4163198<GS>47300112345678948RETISOPHIE<GS>4907019877654324V3542<GS>4W182<GS>4X3724<GS><US>6W76EBC3I2LWHBVGNNYTL34SC6V32S2GDCIQQZLZNMTKCHNVEUISJYUQH5WE3AJJICBNG3YMQ2NXXHP5ZHVOQE332R6TUJDHNOHQ6BI"
+
+    @pytest.fixture
+    def sample_2d_doc_v1(self):
+        return "DC04FR000001FFFF1FB60401FR432,75<GS>44227801234567845202146RETIPATRICK<GS>4A310720224163198<GS>47300112345678948RETISOPHIE<GS>490701987765432<US>QHA4A6QOV6AZJEBTIUNR7QOBXINNTMZTD5COQH6VN24NCZTXA7MYXB6SNSNTWAQRYK3ZFP4ZWBGLTJ6SDSPMURF7YFILKQFIAJY7NTI"
 
     def test_decode_success(self, sample_2d_doc):
         """Test que le décodage réussit et retourne un résultat."""
@@ -53,13 +58,22 @@ class TestAvisImpots:
             signature.alg_hint is not None
         )  # Devrait détecter l'algo (P-256, P-384, etc.)
 
-    def test_typed_data_is_avis_imposition(self, sample_2d_doc):
+
+    def test_typed_data_is_avis_imposition_v2(self, sample_2d_doc):
         """Test que les données typées sont bien un AvisImposition."""
         result = decode_2d_doc(sample_2d_doc)
 
         assert result.typed is not None
         assert isinstance(result.typed, AvisImposition)
         assert result.typed.doc_type == "28"
+
+    def test_typed_data_is_avis_imposition_v1(self, sample_2d_doc_v1):
+        """Test que les données typées sont bien un AvisImposition."""
+        result = decode_2d_doc(sample_2d_doc_v1)
+
+        assert result.typed is not None
+        assert isinstance(result.typed, AvisImpositionV1)
+        assert result.typed.doc_type == "04"
 
     def test_avis_impots_mandatory_fields(self, sample_2d_doc):
         """Test que tous les champs obligatoires sont présents."""
