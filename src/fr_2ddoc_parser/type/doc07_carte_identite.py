@@ -32,6 +32,7 @@ class AdresseIdentite(BaseModel):
     commune: Optional[str] = None  # 6X
     pays: Optional[str] = None  # 6Y
 
+
 # -----------------------------
 # Carte Nationale d'Identité (doc 07)
 class CarteIdentite(BaseModel):
@@ -44,13 +45,13 @@ class CarteIdentite(BaseModel):
     prenom: Optional[str] = None  # 61
     nom_patronymique: str = None  # 62
     nom_usage: Optional[str] = None  # 63
-    type_piece_identite: str # 65
-    numero_document: str # 66
+    type_piece_identite: str  # 65
+    numero_document: str  # 66
     nationalite: str  # 67
     genre: str  # 68
     date_naissance: Optional[date] = None  # 69
     lieu_naissance: Optional[str] = None  # 6A
-    pays_naissance: str # 6C
+    pays_naissance: str  # 6C
 
     # Données Document
     mrz: Optional[str] = None  # 6F
@@ -78,9 +79,27 @@ class CarteIdentite(BaseModel):
         )
 
         known = {
-            "60", "61", "62", "63", "65", "66", "67", "68",
-            "69", "6A", "6C", "6F", "6N", "6O",
-            "6S", "6T", "6U", "6V", "6W", "6X", "6Y"
+            "60",
+            "61",
+            "62",
+            "63",
+            "65",
+            "66",
+            "67",
+            "68",
+            "69",
+            "6A",
+            "6C",
+            "6F",
+            "6N",
+            "6O",
+            "6S",
+            "6T",
+            "6U",
+            "6V",
+            "6W",
+            "6X",
+            "6Y",
         }
 
         extras = {k: v for k, v in f.items() if k not in known}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Dict, Optional, Any
+from typing import Dict, Optional
 
 from fr_2ddoc_parser.crypto.crypto import verify_signature
 from fr_2ddoc_parser.crypto.key_resolver import KeyResolver

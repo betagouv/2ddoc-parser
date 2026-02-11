@@ -58,7 +58,6 @@ class TestAvisImpots:
             signature.alg_hint is not None
         )  # Devrait détecter l'algo (P-256, P-384, etc.)
 
-
     def test_typed_data_is_avis_imposition_v2(self, sample_2d_doc):
         """Test que les données typées sont bien un AvisImposition."""
         result = decode_2d_doc(sample_2d_doc)

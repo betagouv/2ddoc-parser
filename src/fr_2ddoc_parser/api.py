@@ -1,6 +1,7 @@
 from __future__ import annotations
 import importlib
 import pkgutil
+from typing import Optional
 
 from fr_2ddoc_parser.crypto.key_resolver import local_key_resolver
 from fr_2ddoc_parser.model.models import Decoded2DDoc
@@ -40,7 +41,7 @@ def decode_2d_doc(data: str) -> Decoded2DDoc:
     tuple: Optional[tuple[TypeHandler, str]] = get_handler(parsed_data.header.doc_type)
     detected_handler: Optional[TypeHandler] = None
     handler_name: Optional[str] = None
-    if tuple is not None :
+    if tuple is not None:
         detected_handler, handler_name = tuple
     if detected_handler:
         parsed_data.typed = detected_handler(parsed_data)
