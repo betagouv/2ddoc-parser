@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "2ddoc_parser"
-version = "1.0.0"
+version = "1.0.3"
 description = "Api pour décodé et vérifier les 2D docs de l'ANTS"
 authors = ["Nicolas Sagon <nicolas.sagon@beta.gouv.fr>"]
 readme = "README.md"
