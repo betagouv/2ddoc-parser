@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 from fr_2ddoc_parser.crypto.crypto import verify_signature
 from fr_2ddoc_parser.crypto.key_resolver import KeyResolver
+from fr_2ddoc_parser.type.base import GenericDoc
 from pydantic import BaseModel
 
 GS = "\x1d"  # Group Separator (sépare les paires champ/valeur)
@@ -43,7 +44,7 @@ class Decoded2DDoc:
     # Paires ID -> valeur (après parsing des segments GS)
     fields: Dict[str, str] = field(default_factory=dict)
     # Variante typée (si un modèle dédié existe pour ce type)
-    typed: Optional[BaseModel] = None
+    typed: Optional[Union[BaseModel, GenericDoc]] = None
     signature: SignatureBlock = field(default_factory=lambda: SignatureBlock(False))
     is_valid: bool = False
     ants_type: Optional[str] = None
