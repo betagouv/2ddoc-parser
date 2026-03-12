@@ -331,9 +331,7 @@ class KeyResolver:
                     certs = _parse_any_certs(data)
                     for c in certs:
                         try:
-                            _index_cert_for_ca(
-                                ca_id, c, leaf_index, per_ca_leaf
-                            )
+                            _index_cert_for_ca(ca_id, c, leaf_index, per_ca_leaf)
                         except Exception:
                             pass
                     # 2) si HTML, suivre les liens .cer/.crt/.der/.pem
