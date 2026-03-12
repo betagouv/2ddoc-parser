@@ -8,7 +8,10 @@ import xml.etree.ElementTree as ET
 
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.x509.extensions import SubjectKeyIdentifier
+from cryptography.x509.oid import ExtensionOID
 import hashlib
+from typing import cast
 
 import urllib.request
 import urllib.parse
@@ -150,6 +153,8 @@ def _parse_tsl(
         else ET.ElementTree(ET.fromstring(source))
     )
     root = tree.getroot()
+    if root is None:
+        return [], {}
 
     records: List[_CertRecord] = []
     tsp_uris: Dict[str, List[str]] = {}
@@ -228,13 +233,10 @@ def _derive_cert_ids(cert: x509.Certificate) -> list[str]:
 
     # SKI (Subject Key Identifier) → dernières n hex-digits
     try:
-        ski = (
-            cert.extensions.get_extension_for_oid(
-                x509.ExtensionOID.SUBJECT_KEY_IDENTIFIER
-            )
-            .value.digest.hex()
-            .upper()
+        ski_ext = cert.extensions.get_extension_for_oid(
+            ExtensionOID.SUBJECT_KEY_IDENTIFIER
         )
+        ski = cast(SubjectKeyIdentifier, ski_ext.value).digest.hex().upper()
         for n in (4, 5, 6, 8):
             if len(ski) >= n:
                 ids.add(ski[-n:])
@@ -250,6 +252,18 @@ def _derive_cert_ids(cert: x509.Certificate) -> list[str]:
         ids.add(spki_sha1[:n])
 
     return list(ids)
+
+
+def _index_cert_for_ca(
+    ca_id: str,
+    cert: x509.Certificate,
+    target_index: Dict[Tuple[str, str], x509.Certificate],
+    target_bucket: Dict[str, list[x509.Certificate]],
+) -> None:
+    ca = ca_id.upper()
+    target_bucket.setdefault(ca, []).append(cert)
+    for cid in _derive_cert_ids(cert) + _ids_from_subject(cert):
+        target_index[(ca, cid.upper())] = cert
 
 
 class KeyResolver:
@@ -317,8 +331,8 @@ class KeyResolver:
                     certs = _parse_any_certs(data)
                     for c in certs:
                         try:
-                            cls._index_cert_for_ca(
-                                cls, ca_id, c, leaf_index, per_ca_leaf
+                            _index_cert_for_ca(
+                                ca_id, c, leaf_index, per_ca_leaf
                             )
                         except Exception:
                             pass
@@ -330,8 +344,8 @@ class KeyResolver:
                                 continue
                             for c in _parse_any_certs(blob):
                                 try:
-                                    cls._index_cert_for_ca(
-                                        cls, ca_id, c, leaf_index, per_ca_leaf
+                                    _index_cert_for_ca(
+                                        ca_id, c, leaf_index, per_ca_leaf
                                     )
                                 except Exception:
                                     pass
@@ -342,19 +356,6 @@ class KeyResolver:
             leaf_index=leaf_index,
             per_ca_leaf=per_ca_leaf,
         )
-
-    def _index_cert_for_ca(
-        self,
-        ca_id: str,
-        cert: x509.Certificate,
-        target_index: Dict[Tuple[str, str], x509.Certificate],
-        target_bucket: Dict[str, list[x509.Certificate]],
-    ):
-        ca = ca_id.upper()
-        target_bucket.setdefault(ca, []).append(cert)
-        # IDs candidats
-        for cid in _derive_cert_ids(cert) + _ids_from_subject(cert):
-            target_index[(ca, cid.upper())] = cert
 
     def resolve(self, ca_id: str, cert_id: str):
         """Retourne la *clé publique* pour (CA, cert_id), en préférant une feuille EC si dispo."""
