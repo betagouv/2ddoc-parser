@@ -19,6 +19,7 @@ pydantic = "^2.12.4"
 ruff = "^0.12.11"
 pytest = "^8.4.1"
 pre-commit = "^3.6.0"
+pyright = "^1.1.408"
 
 [build-system]
 requires = ["poetry-core"]
