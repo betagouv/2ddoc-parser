@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, cast
 
 from fr_2ddoc_parser.model.models import Decoded2DDoc
 from fr_2ddoc_parser.parser.helper import to_date_ddmmyyyy
@@ -43,7 +43,7 @@ class CarteIdentite(BaseModel):
     # Données Personnelles
     liste_prenoms: str  # 60
     prenom: Optional[str] = None  # 61
-    nom_patronymique: str = None  # 62
+    nom_patronymique: Optional[str] = None  # 62
     nom_usage: Optional[str] = None  # 63
     type_piece_identite: str  # 65
     numero_document: str  # 66
@@ -105,10 +105,10 @@ class CarteIdentite(BaseModel):
         extras = {k: v for k, v in f.items() if k not in known}
 
         obj = cls(
-            doc_type=d.header.doc_type,
+            doc_type=cast(Literal["07"], d.header.doc_type),
             liste_prenoms=f.get("60", "").strip(),
             prenom=f.get("61"),
-            nom_patronymique=f.get("62"),
+            nom_patronymique=f.get("62") or "",
             nom_usage=f.get("63"),
             type_piece_identite=f.get("65", "").strip(),
             numero_document=f.get("66", "").strip(),
@@ -116,7 +116,7 @@ class CarteIdentite(BaseModel):
             genre=f.get("68", "").strip(),
             date_naissance=to_date_ddmmyyyy(f.get("69")),
             lieu_naissance=f.get("6A"),
-            pays_naissance=f.get("6C"),
+            pays_naissance=f.get("6C") or "",
             mrz=f.get("6F"),
             date_debut_validite=to_date_ddmmyyyy(f.get("6N")),
             date_fin_validite=to_date_ddmmyyyy(f.get("6O")),
@@ -124,12 +124,12 @@ class CarteIdentite(BaseModel):
             extras=extras,
         )
 
-        obj.validate()
+        obj.validate_required_fields()
         return obj
 
     # -------------------------
     # Validation des règles O / F
-    def validate(self) -> None:
+    def validate_required_fields(self) -> None:
         # 1. Validation Prénoms (60) - O
         if not self.liste_prenoms:
             raise ValueError("La liste des prénoms (60) est obligatoire.")

@@ -77,6 +77,8 @@ class TestAvisImpots:
     def test_avis_impots_mandatory_fields(self, sample_2d_doc):
         """Test que tous les champs obligatoires sont présents."""
         result = decode_2d_doc(sample_2d_doc)
+        assert result.typed is not None
+        assert isinstance(result.typed, AvisImposition)
         avis = result.typed
 
         # Champs obligatoires
@@ -97,6 +99,8 @@ class TestAvisImpots:
     def test_avis_impots_optional_fields(self, sample_2d_doc):
         """Test les champs optionnels présents dans l'exemple."""
         result = decode_2d_doc(sample_2d_doc)
+        assert result.typed is not None
+        assert isinstance(result.typed, AvisImposition)
         avis = result.typed
 
         # Ces champs peuvent être None ou avoir une valeur
@@ -109,6 +113,8 @@ class TestAvisImpots:
     def test_adresse_parsing(self, sample_2d_doc):
         """Test que l'adresse est correctement parsée."""
         result = decode_2d_doc(sample_2d_doc)
+        assert result.typed is not None
+        assert isinstance(result.typed, AvisImposition)
         avis = result.typed
         adresse = avis.adresse
 
@@ -118,6 +124,8 @@ class TestAvisImpots:
     def test_adresse_validation_ok(self, sample_2d_doc):
         """Test que l'adresse passe la validation."""
         result = decode_2d_doc(sample_2d_doc)
+        assert result.typed is not None
+        assert isinstance(result.typed, AvisImposition)
         avis = result.typed
 
         # La validation est appelée automatiquement dans from_decoded
@@ -150,6 +158,8 @@ class TestAvisImpots:
     def test_nombre_parts_format(self, sample_2d_doc):
         """Test que le nombre de parts est au format Decimal."""
         result = decode_2d_doc(sample_2d_doc)
+        assert result.typed is not None
+        assert isinstance(result.typed, AvisImposition)
         avis = result.typed
 
         assert isinstance(avis.nombre_de_parts, Decimal)
@@ -164,6 +174,8 @@ class TestAvisImpots:
             assert isinstance(result.header.issue_date, date)
 
         # Date de mise en recouvrement
+        assert result.typed is not None
+        assert isinstance(result.typed, AvisImposition)
         avis = result.typed
         assert isinstance(avis.date_mise_en_recouvrement, date)
         assert avis.date_mise_en_recouvrement.year >= 2000

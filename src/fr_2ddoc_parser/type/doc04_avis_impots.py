@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, cast
 
 from pydantic import BaseModel, Field
 
@@ -40,11 +40,11 @@ class AvisImpositionV1(BaseModel):
         extras = {k: v for k, v in f.items() if k not in known}
 
         obj = cls(
-            doc_type=d.header.doc_type,
+            doc_type=cast(Literal["04"], d.header.doc_type),
             revenu_fiscal_de_reference=to_int(f.get("41")),
-            nombre_de_parts=to_dec(f.get("43")),
+            nombre_de_parts=cast(Decimal, to_dec(f.get("43")) or Decimal("0")),
             reference_avis=f.get("44", "").strip(),
-            annee_des_revenus=to_int(f.get("45")),
+            annee_des_revenus=cast(int, to_int(f.get("45")) or 0),
             declarant_1=f.get("46", "").strip(),
             declarant_1_numero_fiscal=f.get("47"),
             declarant_2=f.get("48"),
@@ -53,13 +53,13 @@ class AvisImpositionV1(BaseModel):
             extras=extras,
         )
         # Ne pas utiliser la validation Pydantic pour les règles métier :
-        # on conserve le comportement existant en appelant validate() explicitement.
-        obj.validate()
+        # on conserve le comportement existant en appelant validate_required_fields() explicitement.
+        obj.validate_required_fields()
         return obj
 
     # -------------------------
     # Validation des règles O / F
-    def validate(self) -> None:
+    def validate_required_fields(self) -> None:
         # Obligatoires
         if not self.nombre_de_parts:
             raise ValueError("Nombre de parts (43) est obligatoire.")
