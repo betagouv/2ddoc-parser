@@ -1,0 +1,45 @@
+# Cession droits sociaux (Code 20)
+
+*Extrait du PDF - Pages : 209*
+
+## Spécifications
+
+| ID | Description | Valeur |
+| --- | --- | --- |
+| - |  |  |
+| - | FFFF – Pas de date d’émission |  |
+| - | 21BB – 23 août 2023 |  |
+| - | 20 – Déclaration de cession de droits sociaux |  |
+| - | 01 – Périmètre ANTS |  |
+| - | FR – France |  |
+| - | 4C |  |
+| - | 4J |  |
+| - | 4E |  |
+| - | 4F |  |
+| - | 4K |  |
+| - | 4L |  |
+| - | 4M |  |
+| - |  |  |
+| - |  |  |
+| - |  |  |
+| - |  |  |
+| - |  |  |
+| - | DC04FR000001FFFF21BB2001FR4C070620234J10000000<GS>4E1000
+00<GS>4FENREGISTR1234564K@SPECIMEN@
+INCORPORATED<GS>4LRETI
+PATRICK<GS>4M2,5<US>UXMO63IXZ66K3JECXHZ6USNQNPPI4ZWQSJLG
+IXEFTRCU5XUJJXYF3FCDVCKSKQELMPMQGIL5CLPG75QBCNVADRLUILT4
+VEKOAVMMM5Y |  |
+| - | DC04FR000001FFFF21BB2001FR4C070620234J10000000<GS>4E1000
+00<GS>4FENREGISTR1234564K@SPECIMEN@
+INCORPORATED<GS>4LRETI PATRICK<GS>4M2,5 |  |
+| - |  |  |
+| - |  |  |
+| - |  |  |
+| - |  |  |
+
+## Message complet (Brut)
+
+```
+DC04FR000001FFFF21BB2001FR4C070620234J10000000<GS>4E100000<GS>4FENREGISTR1234564K@SPECIMEN@INCORPORATED<GS>4LRETIPATRICK<GS>4M2,5<US>UXMO63IXZ66K3JECXHZ6USNQNPPI4ZWQSJLGIXEFTRCU5XUJJXYF3FCDVCKSKQELMPMQGIL5CLPG75QBCNVADRLUILT4VEKOAVMMM5Y
+```
