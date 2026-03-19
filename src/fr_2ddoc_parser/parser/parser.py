@@ -64,23 +64,37 @@ def _days_hex_to_date(hex_days: str) -> Optional[date]:
 
 
 # ---------------------------------------------------------------------------
-# En-tête DC04 uniquement (positions fixes)
-def parse_header_dc04(data: str) -> Header:
-    if len(data) < 26 or not data.startswith("DC"):
+# En-tête (positions fixes selon version)
+def parse_header(data: str) -> Header:
+    if len(data) < 22 or not data.startswith("DC"):
         raise TwoDDocFormatError("Marqueur absent (doit commencer par 'DC').")
-    ver = data[2:4]
-    if ver != "04":
+
+    ver_str = data[2:4]
+    try:
+        ver = int(ver_str)
+    except ValueError:
+        raise TwoDDocFormatError(f"Version invalide: {ver_str!r}")
+
+    if ver not in (2, 3, 4):
         raise TwoDDocUnsupportedVersion(
-            f"Version non supportée: {ver!r} (DC04 uniquement)"
+            f"Version non supportée: {ver_str!r} (V02, V03 ou V04 uniquement)"
         )
+
     ca, cert = data[4:8], data[8:12]
     issue, sig = data[12:16], data[16:20]
-    doc_type, perimeter, country = data[20:22], data[22:24], data[24:26]
-    header_len = 26
+    doc_type, perimeter = data[20:22], data[22:24]
+
+    country = None
+    header_len = 24
+
+    if ver == 4:
+        country = data[24:26]
+        header_len = 26
+
     return Header(
         raw=data[:header_len],
         marker="DC",
-        version=4,
+        version=ver,
         ca_id=ca,
         cert_id=cert,
         issue_date=_days_hex_to_date(issue),
@@ -202,7 +216,7 @@ def parse(data: str) -> Decoded2DDoc:
 
     data = _normalize_separators(data)
 
-    header = parse_header_dc04(data)
+    header = parse_header(data)
     after_header = data[header.header_len :]
 
     payload_no_sig, sig_b32 = split_payload_and_signature(after_header)

@@ -24,7 +24,7 @@ class Header:
     signature_date: Optional[date]
     doc_type: str
     perimeter: str
-    country: str
+    country: Optional[str] = None
     header_len: int = 0
 
 
