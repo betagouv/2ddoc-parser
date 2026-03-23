@@ -77,7 +77,19 @@ class TestJustificatifDomicile:
                 SignatureBlock,
             )
 
-            h = Header("", "DC", 3, "FR00", "0001", None, None, "00", "01", "FR", 24)
+            h = Header(
+                raw="",
+                marker="DC",
+                version=3,
+                ca_id="FR00",
+                cert_id="0001",
+                issue_date=None,
+                signature_date=None,
+                doc_type="00",
+                perimeter="01",
+                country="FR",
+                header_len=24,
+            )
             d = Decoded2DDoc(
                 header=h,
                 sign_payload=b"",
@@ -91,7 +103,19 @@ class TestJustificatifDomicile:
         """Test que l'identité via 11+12+13 fonctionne aussi."""
         from fr_2ddoc_parser.model.models import Header, Decoded2DDoc, SignatureBlock
 
-        h = Header("", "DC", 3, "FR00", "0001", None, None, "00", "01", "FR", 24)
+        h = Header(
+            raw="",
+            marker="DC",
+            version=3,
+            ca_id="FR00",
+            cert_id="0001",
+            issue_date=None,
+            signature_date=None,
+            doc_type="00",
+            perimeter="01",
+            country="FR",
+            header_len=24,
+        )
         f = {
             "11": "MME",
             "12": "Jane",

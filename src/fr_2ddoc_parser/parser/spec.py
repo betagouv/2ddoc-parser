@@ -1,12 +1,17 @@
-import dataclasses
+from pydantic import BaseModel
 
 
-@dataclasses.dataclass
-class DataIdentifier:
+class DataIdentifier(BaseModel):
     identifier: str
     min_size: int
     max_size: int
     label: str
+
+    ## Used for positionnal arguments in constructor
+    def __init__(self, identifier: str, min_size: int, max_size: int, label: str):
+        super().__init__(
+            identifier=identifier, min_size=min_size, max_size=max_size, label=label
+        )
 
 
 SPEC_2D: list[DataIdentifier] = [

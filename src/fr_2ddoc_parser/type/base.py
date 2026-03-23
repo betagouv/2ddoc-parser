@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Dict
+from pydantic import BaseModel
 
 
-@dataclass
-class GenericDoc:
+class GenericDoc(BaseModel):
     """Fallback si aucun modèle dédié n'est déclaré pour doc_type."""
 
     doc_type: str
