@@ -1,3 +1,8 @@
+---
+name: add-2ddoc-type
+description: Aide à l'ajout de nouveaux types de documents 2D-Doc
+---
+
 # Skill: add-2ddoc-type
 
 Ce skill permet d'automatiser l'intégration d'un nouveau type de document 2D-DOC dans la bibliothèque en se basant sur la documentation technique et les exemples extraits.

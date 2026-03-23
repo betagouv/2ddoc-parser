@@ -174,6 +174,7 @@ Cette bibliothèque supporte les versions **2, 3 et 4** du format 2D-DOC.
 ### Types implémentés
 | Type | Description | Classe typée | Version supportée |
 |------|-------------|--------------|-------------------|
+| **00** | Justificatif de domicile | `JustificatifDomicile` | v2, v3, v4 |
 | **04** | Avis d'impôts sur le revenu (Ancien format) | `AvisImpositionV1` | v2, v3, v4 |
 | **07** | Titre d'identité | `CarteIdentite` | v2, v3, v4 |
 | **28** | Avis d'impôts sur le revenu (Nouveau format) | `AvisImposition` | v2, v3, v4 |
