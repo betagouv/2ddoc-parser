@@ -155,12 +155,29 @@ except ValueError as e:
     print(f"Erreur de validation : {e}")
 ```
 
+## 📖 Documentation & Spécifications
+
+La documentation technique officielle de l'ANTS a été extraite et organisée dans le dossier `/doc` pour faciliter l'implémentation de nouveaux types de documents :
+
+- **[`/doc/spec_2d_doc`](/doc/spec_2d_doc)** : Contient les tableaux descriptifs détaillés de chaque type de document (champs obligatoires, formats, identifiants).
+- **[`/doc/examples_final`](/doc/examples_final)** : Regroupe les exemples réels de codes 2D-DOC fournis par l'ANTS pour chaque type de document, permettant de valider l'implémentation du parsing.
+
+⚠️ **Important** : La doc extraite est la version 3.3.7.2 !
+
 ## 📋 Types de documents supportés
 
-| Type | Description | Classe typée |
-|------|-------------|--------------|
-| **28** | Avis d'impôts sur le revenu | `AvisImposition` |
-| _Autres_ | Document générique | `GenericDoc` |
+### Versions du format
+Cette bibliothèque supporte les versions **2, 3 et 4** du format 2D-DOC.
+> [!IMPORTANT]
+> La **Version 1** n'est **pas supportée** en raison de différences techniques majeures dans la structure des contenus encodés (absence de certains marqueurs de structure et différences d'encodage binaire).
+
+### Types implémentés
+| Type | Description | Classe typée | Version supportée |
+|------|-------------|--------------|-------------------|
+| **04** | Avis d'impôts sur le revenu (Ancien format) | `AvisImpositionV1` | v2, v3, v4 |
+| **07** | Titre d'identité | `CarteIdentite` | v2, v3, v4 |
+| **28** | Avis d'impôts sur le revenu (Nouveau format) | `AvisImposition` | v2, v3, v4 |
+| _Autres_ | Document générique | `GenericDoc` | v2, v3, v4 |
 
 Pour ajouter de nouveaux types de documents, consultez le [CONTRIBUTING.md](CONTRIBUTING.md).
 

@@ -23,3 +23,12 @@ class TestTwoDDocV2:
         assert result.header is not None
         assert result.fields is not None
         assert result.signature is not None
+
+        # V2: en-tête fixe à 22 caractères (pas de périmètre/pays).
+        assert result.header.version == 2
+        assert result.header.header_len == 22
+        assert result.header.perimeter == ""
+
+        # Le payload doit démarrer sur le champ "01" (et non être décalé).
+        assert "01" in result.fields
+        assert result.fields["01"] == "D2FD985688194158BAA118476D54422A"

@@ -82,14 +82,27 @@ def parse_header(data: str) -> Header:
 
     ca, cert = data[4:8], data[8:12]
     issue, sig = data[12:16], data[16:20]
-    doc_type, perimeter = data[20:22], data[22:24]
 
-    country = None
-    header_len = 24
-
-    if ver == 4:
-        country = data[24:26]
+    # Longueur d'en-tête selon version: V1/V2=22, V3=24, V4=26.
+    if ver == 2:
+        header_len = 22
+        doc_type = data[20:22]
+        perimeter = ""
+        country = None
+    elif ver == 3:
+        if len(data) < 24:
+            raise TwoDDocFormatError("En-tête incomplet pour version 03 (24 caractères attendus).")
+        header_len = 24
+        doc_type = data[20:22]
+        perimeter = data[22:24]
+        country = None
+    else:  # ver == 4
+        if len(data) < 26:
+            raise TwoDDocFormatError("En-tête incomplet pour version 04 (26 caractères attendus).")
         header_len = 26
+        doc_type = data[20:22]
+        perimeter = data[22:24]
+        country = data[24:26]
 
     return Header(
         raw=data[:header_len],
