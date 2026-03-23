@@ -1,4 +1,4 @@
-# Guide de Contribution 2d-doc-parser
+# Guide de Contribution 2ddoc-parser
 
 Merci de l'intérêt que vous portez à l'amélioration de cette bibliothèque ! Ce guide vous aidera à ajouter de nouveaux types de documents 2D-DOC.
 
