@@ -7,7 +7,7 @@ class DataIdentifier(BaseModel):
     max_size: int
     label: str
 
-    ## Used for positionnal arguments in constructor
+    ## Used for positional arguments in constructor
     def __init__(self, identifier: str, min_size: int, max_size: int, label: str):
         super().__init__(
             identifier=identifier, min_size=min_size, max_size=max_size, label=label
