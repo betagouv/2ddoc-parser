@@ -21,8 +21,16 @@ class TestAvisImpots:
         return "DC04FR000001000F23DC2801FR432,75<GS>44227801234567845202146RETI PATRICK<GS>4A310720224Y145 RUE JULLIARD/ZASPECIMEN/78320/LEVIS STNOM<GS>4163198<GS>47300112345678948RETISOPHIE<GS>4907019877654324V3542<GS>4W182<GS>4X3724<GS><US>6W76EBC3I2LWHBVGNNYTL34SC6V32S2GDCIQQZLZNMTKCHNVEUISJYUQH5WE3AJJICBNG3YMQ2NXXHP5ZHVOQE332R6TUJDHNOHQ6BI"
 
     @pytest.fixture
-    def sample_2d_doc_v1(self):
+    def sample_2d_doc_v4_legacy(self):
+        """Un exemple en version 4 mais avec un type de doc ancien (04)."""
         return "DC04FR000001FFFF1FB60401FR432,75<GS>44227801234567845202146RETIPATRICK<GS>4A310720224163198<GS>47300112345678948RETISOPHIE<GS>490701987765432<US>QHA4A6QOV6AZJEBTIUNR7QOBXINNTMZTD5COQH6VN24NCZTXA7MYXB6SNSNTWAQRYK3ZFP4ZWBGLTJ6SDSPMURF7YFILKQFIAJY7NTI"
+
+    @pytest.fixture
+    def sample_2d_doc_v3(self):
+        """Un exemple fictif en version 3."""
+        # Même structure que V2 (24 chars de header)
+        # Ajout des champs obligatoires pour le type 28 (4A pour la date, 4Y pour l'adresse)
+        return "DC03FR000001000000002801432,75<GS>44227801234567845202146RETI PATRICK<GS>4A310720224Y1 RUE DE LA PAIX/75000/PARIS<US>GEZDGNA="
 
     def test_decode_success(self, sample_2d_doc):
         """Test que le décodage réussit et retourne un résultat."""
@@ -66,13 +74,19 @@ class TestAvisImpots:
         assert isinstance(result.typed, AvisImposition)
         assert result.typed.doc_type == "28"
 
-    def test_typed_data_is_avis_imposition_v1(self, sample_2d_doc_v1):
+    def test_typed_data_is_avis_imposition_v1(self, sample_2d_doc_v4_legacy):
         """Test que les données typées sont bien un AvisImposition."""
-        result = decode_2d_doc(sample_2d_doc_v1)
+        result = decode_2d_doc(sample_2d_doc_v4_legacy)
 
         assert result.typed is not None
         assert isinstance(result.typed, AvisImpositionV1)
         assert result.typed.doc_type == "04"
+
+    def test_decode_v3_success(self, sample_2d_doc_v3):
+        """Test que le décodage V3 réussit."""
+        result = decode_2d_doc(sample_2d_doc_v3)
+        assert result.header.version == 3
+        assert result.header.doc_type == "28"
 
     def test_avis_impots_mandatory_fields(self, sample_2d_doc):
         """Test que tous les champs obligatoires sont présents."""
