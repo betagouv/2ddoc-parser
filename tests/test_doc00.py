@@ -94,7 +94,7 @@ class TestJustificatifDomicile:
                 header=h,
                 sign_payload=b"",
                 fields={"22": "rue", "24": "75000", "25": "Paris", "26": "FR"},
-                signature=SignatureBlock(False),
+                signature=SignatureBlock(present=False),
             )
             # Ici il manque 20, 21, 23 aussi
             JustificatifDomicile.from_decoded(d)
@@ -129,7 +129,10 @@ class TestJustificatifDomicile:
             "26": "FR",
         }
         d = Decoded2DDoc(
-            header=h, sign_payload=b"", fields=f, signature=SignatureBlock(False)
+            header=h,
+            sign_payload=b"",
+            fields=f,
+            signature=SignatureBlock(present=False),
         )
         doc = JustificatifDomicile.from_decoded(d)
         assert doc.qualite == "MME"

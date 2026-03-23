@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 from pydantic import BaseModel
 
 
@@ -9,5 +9,5 @@ class GenericDoc(BaseModel):
 
     doc_type: str
     perimeter: str
-    country: str
+    country: Optional[str] = None
     fields: Dict[str, str]

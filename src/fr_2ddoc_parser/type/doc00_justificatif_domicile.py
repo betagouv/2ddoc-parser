@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Dict, Literal, Optional, cast
 
-from pydantic import BaseModel, Field
-
 from fr_2ddoc_parser.model.models import Decoded2DDoc
 from fr_2ddoc_parser.parser.helper import format_name
 from fr_2ddoc_parser.registry.registry import register
+from pydantic import BaseModel, Field
 
 
 class JustificatifDomicile(BaseModel):
