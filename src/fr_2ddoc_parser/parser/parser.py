@@ -91,14 +91,18 @@ def parse_header(data: str) -> Header:
         country = None
     elif ver == 3:
         if len(data) < 24:
-            raise TwoDDocFormatError("En-tête incomplet pour version 03 (24 caractères attendus).")
+            raise TwoDDocFormatError(
+                "En-tête incomplet pour version 03 (24 caractères attendus)."
+            )
         header_len = 24
         doc_type = data[20:22]
         perimeter = data[22:24]
         country = None
     else:  # ver == 4
         if len(data) < 26:
-            raise TwoDDocFormatError("En-tête incomplet pour version 04 (26 caractères attendus).")
+            raise TwoDDocFormatError(
+                "En-tête incomplet pour version 04 (26 caractères attendus)."
+            )
         header_len = 26
         doc_type = data[20:22]
         perimeter = data[22:24]
