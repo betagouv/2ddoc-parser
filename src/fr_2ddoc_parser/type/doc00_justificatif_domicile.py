@@ -5,6 +5,7 @@ from typing import Dict, Literal, Optional, cast
 from pydantic import BaseModel, Field
 
 from fr_2ddoc_parser.model.models import Decoded2DDoc
+from fr_2ddoc_parser.parser.helper import format_name
 from fr_2ddoc_parser.registry.registry import register
 
 
@@ -13,6 +14,7 @@ class JustificatifDomicile(BaseModel):
 
     doc_type: Literal["00"]
 
+    id_document: Optional[str] = None  # 01 (F) - Présent dans certains exemples, mais pas dans la doc. On le rend optionnel.
     # Bénéficiaire
     ligne1: Optional[str] = None  # 10 (O*)
     qualite: Optional[str] = None  # 11 (O*)
@@ -42,22 +44,23 @@ class JustificatifDomicile(BaseModel):
     def from_decoded(cls, d: Decoded2DDoc) -> "JustificatifDomicile":
         f = d.fields
         known = {
-            "10", "11", "12", "13", "1G", "1I", "1J", "1K", "1L",
+            "01","10", "11", "12", "13", "1G", "1I", "1J", "1K", "1L",
             "20", "21", "22", "23", "24", "25", "26"
         }
         extras = {k: v for k, v in f.items() if k not in known}
 
         obj = cls(
             doc_type=cast(Literal["00"], d.header.doc_type),
-            ligne1=f.get("10"),
-            qualite=f.get("11"),
-            prenom=f.get("12"),
-            nom=f.get("13"),
+            id_document=f.get("01"),
+            ligne1=format_name(f.get("10")),
+            qualite=format_name(f.get("11")),
+            prenom=format_name(f.get("12")),
+            nom=format_name(f.get("13")),
             co_beneficiaire_present=f.get("1G"),
-            co_ligne1=f.get("1I"),
-            co_qualite=f.get("1J"),
-            co_prenom=f.get("1K"),
-            co_nom=f.get("1L"),
+            co_ligne1=format_name(f.get("1I")),
+            co_qualite=format_name(f.get("1J")),
+            co_prenom=format_name(f.get("1K")),
+            co_nom=format_name(f.get("1L")),
             ligne2=f.get("20"),
             ligne3=f.get("21"),
             voie=f.get("22"),

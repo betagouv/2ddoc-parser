@@ -43,7 +43,7 @@ class TestJustificatifDomicile:
         assert isinstance(doc, JustificatifDomicile)
 
         # Bénéficiaire
-        assert doc.ligne1 == "MLLE/SAMPLE/ANGELA"
+        assert doc.ligne1 == "MLLE SAMPLE ANGELA"
         
         # Adresse
         assert doc.pays == "FR"
@@ -53,6 +53,14 @@ class TestJustificatifDomicile:
         assert doc.voie == "7 PLACE DES SPECIMENS"
         assert doc.ligne5 == ""
         assert doc.localite == "METZ"
+
+    def test_name_formatting(self):
+        """Test spécifique pour le formatage des noms avec slashes."""
+        from fr_2ddoc_parser.parser.helper import format_name
+        assert format_name("/SERINE/KEVIN") == "SERINE KEVIN"
+        assert format_name("MLLE/SAMPLE/ANGELA") == "MLLE SAMPLE ANGELA"
+        assert format_name("/TEST/") == "TEST"
+        assert format_name(None) is None
 
     def test_mandatory_fields_validation(self):
         """Test la validation des champs obligatoires."""

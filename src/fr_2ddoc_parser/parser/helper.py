@@ -31,3 +31,13 @@ def to_date_ddmmyyyy(s: Optional[str]) -> Optional[date]:
         return datetime.strptime(s, "%d%m%Y").date()
     except ValueError:
         return None
+
+
+def format_name(s: Optional[str]) -> Optional[str]:
+    """Nettoie les slashes (/NOM/PRENOM) pour retourner 'NOM PRENOM'."""
+    if not s:
+        return s
+    # On vire les slashes de début/fin
+    cleaned = s.strip("/")
+    # On remplace les slashes internes par des espaces
+    return cleaned.replace("/", " ").strip()
