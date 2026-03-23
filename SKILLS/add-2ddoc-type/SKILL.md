@@ -51,3 +51,4 @@ Ce skill permet d'automatiser l'intégration d'un nouveau type de document 2D-DO
 - Respecter le style existant (Pydantic v2, typage strict).
 - Utiliser des noms de variables en français pour coller à la nomenclature de l'ANTS si nécessaire.
 - **Ne jamais modifier manuellement le fichier `registry.py`**; l'utilisation du décorateur `@register` dans le nouveau modèle suffit à l'enregistrement automatique du type.
+- Avant de pousser du code il faut s'assurer que le formattage est bon avec `poetry run ruff format`

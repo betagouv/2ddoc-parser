@@ -14,7 +14,9 @@ class JustificatifDomicile(BaseModel):
 
     doc_type: Literal["00"]
 
-    id_document: Optional[str] = None  # 01 (F) - Présent dans certains exemples, mais pas dans la doc. On le rend optionnel.
+    id_document: Optional[str] = (
+        None  # 01 (F) - Présent dans certains exemples, mais pas dans la doc. On le rend optionnel.
+    )
     # Bénéficiaire
     ligne1: Optional[str] = None  # 10 (O*)
     qualite: Optional[str] = None  # 11 (O*)
@@ -44,8 +46,23 @@ class JustificatifDomicile(BaseModel):
     def from_decoded(cls, d: Decoded2DDoc) -> "JustificatifDomicile":
         f = d.fields
         known = {
-            "01","10", "11", "12", "13", "1G", "1I", "1J", "1K", "1L",
-            "20", "21", "22", "23", "24", "25", "26"
+            "01",
+            "10",
+            "11",
+            "12",
+            "13",
+            "1G",
+            "1I",
+            "1J",
+            "1K",
+            "1L",
+            "20",
+            "21",
+            "22",
+            "23",
+            "24",
+            "25",
+            "26",
         }
         extras = {k: v for k, v in f.items() if k not in known}
 
@@ -77,19 +94,21 @@ class JustificatifDomicile(BaseModel):
         # Check O* for Ligne 1 OR (Qualité, Prénom, Nom)
         has_ligne1 = bool(self.ligne1)
         has_full_identity = bool(self.qualite and self.prenom and self.nom)
-        
+
         if not (has_ligne1 or has_full_identity):
-            raise ValueError("L'identité du bénéficiaire est obligatoire (champ 10 ou champs 11+12+13).")
+            raise ValueError(
+                "L'identité du bénéficiaire est obligatoire (champ 10 ou champs 11+12+13)."
+            )
 
         # Mandatory fields (O)
-        # Note: In some examples, these can be empty but present. 
+        # Note: In some examples, these can be empty but present.
         # The spec says O, but sometimes they are empty strings.
         # We check presence in the fields dictionary or if they are not None if we want strictness.
         # Given the reference doc28, we check if they are set.
-        
+
         # In the example Page 225, 20 and 23 are <vide> (empty).
         # So we should allow them to be empty strings if they are present.
-        
+
         if self.ligne2 is None:
             raise ValueError("Ligne 2 de l'adresse (20) est obligatoire.")
         if self.ligne3 is None:
