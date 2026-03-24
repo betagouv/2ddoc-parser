@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import date
 from typing import Dict, Optional, Union
 
 from fr_2ddoc_parser.crypto.crypto import verify_signature
 from fr_2ddoc_parser.crypto.key_resolver import KeyResolver
 from fr_2ddoc_parser.type.base import GenericDoc
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 GS = "\x1d"  # Group Separator (sépare les paires champ/valeur)
 US = "\x1f"  # Unit Separator (sépare les données de la signature)
 
 
-@dataclass(frozen=True)
-class Header:
+class Header(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     raw: str
     marker: str
     version: int
@@ -28,24 +28,24 @@ class Header:
     header_len: int = 0
 
 
-@dataclass
-class SignatureBlock:
-    present: bool
+class SignatureBlock(BaseModel):
+    present: bool = False
     b32: Optional[str] = None
     raw: Optional[bytes] = None  # décodée en bytes
     alg_hint: Optional[str] = None  # "P-256"/"P-384"/"P-521" if detectable
 
 
-@dataclass
-class Decoded2DDoc:
+class Decoded2DDoc(BaseModel):
     header: Header
     # Données brutes "avant US" (sert au hash/verify)
     sign_payload: bytes
     # Paires ID -> valeur (après parsing des segments GS)
-    fields: Dict[str, str] = field(default_factory=dict)
+    fields: Dict[str, str] = Field(default_factory=dict)
     # Variante typée (si un modèle dédié existe pour ce type)
     typed: Optional[Union[BaseModel, GenericDoc]] = None
-    signature: SignatureBlock = field(default_factory=lambda: SignatureBlock(False))
+    signature: SignatureBlock = Field(
+        default_factory=lambda: SignatureBlock(present=False)
+    )
     is_valid: bool = False
     ants_type: Optional[str] = None
 

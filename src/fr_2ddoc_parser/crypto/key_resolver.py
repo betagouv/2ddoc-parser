@@ -1,5 +1,4 @@
 from __future__ import annotations
-from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Tuple, Union, IO, List, Set
 import base64
 import datetime as dt
@@ -12,6 +11,8 @@ from cryptography.x509.extensions import SubjectKeyIdentifier
 from cryptography.x509.oid import ExtensionOID
 import hashlib
 from typing import cast
+
+from pydantic import BaseModel, ConfigDict
 
 import urllib.request
 import urllib.parse
@@ -32,8 +33,9 @@ NS = {
 SVCSTATUS_INACCORD = "http://uri.etsi.org/TrstSvc/Svcstatus/inaccord"
 
 
-@dataclass(frozen=True)
-class _CertRecord:
+class _CertRecord(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     ca_id: str  # "FR01", "FR03", …
     pem_der: bytes  # DER du X.509 publié dans la TSL
     cert: x509.Certificate

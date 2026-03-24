@@ -241,13 +241,13 @@ def parse(data: str) -> Decoded2DDoc:
 
     sign_payload_bytes = (header.raw + payload_no_sig).encode("utf-8")
 
-    sig_block = SignatureBlock(False)
+    sig_block = SignatureBlock(present=False)
     if sig_b32:
         try:
             sig_raw = base64.b32decode(_b32_fixpad(sig_b32), casefold=True)
         except Exception as e:
             raise TwoDDocFormatError(f"Signature Base32 invalide: {e}")
-        sig_block = SignatureBlock(True, b32=sig_b32, raw=sig_raw)
+        sig_block = SignatureBlock(present=True, b32=sig_b32, raw=sig_raw)
         if len(sig_raw) == 64:
             sig_block.alg_hint = "P-256"
         elif len(sig_raw) == 96:

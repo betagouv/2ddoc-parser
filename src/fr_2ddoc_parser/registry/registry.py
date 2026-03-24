@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Any
+from pydantic import BaseModel
 
 from fr_2ddoc_parser.model.models import Decoded2DDoc
 
@@ -9,8 +9,7 @@ from fr_2ddoc_parser.model.models import Decoded2DDoc
 TypeHandler = Callable[[Decoded2DDoc], Any]
 
 
-@dataclass
-class TypeInfo:
+class TypeInfo(BaseModel):
     code: str
     name: str
     handler: TypeHandler

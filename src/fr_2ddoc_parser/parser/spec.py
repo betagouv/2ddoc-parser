@@ -1,8 +1,7 @@
-import dataclasses
+from typing import NamedTuple
 
 
-@dataclasses.dataclass
-class DataIdentifier:
+class DataIdentifier(NamedTuple):
     identifier: str
     min_size: int
     max_size: int
