@@ -4,6 +4,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Dict, Literal, Optional, cast
 
+from pydantic import BaseModel, Field, model_validator
+
 from fr_2ddoc_parser.model.models import Decoded2DDoc
 from fr_2ddoc_parser.parser.helper import (
     format_name,
@@ -12,14 +14,13 @@ from fr_2ddoc_parser.parser.helper import (
     to_dec,
 )
 from fr_2ddoc_parser.registry.registry import register
-from pydantic import BaseModel, Field
 
 
 # -----------------------------
 # Bénéficiaire
 class Beneficiaire(BaseModel):
     """Bénéficiaire du bulletin de salaire.
-    O* : 10 ou (11, 12, 13)
+    Règle métier : 10 ou (12 et 13) obligatoire.
     """
 
     ligne1: Optional[str] = None  # 10
@@ -27,8 +28,11 @@ class Beneficiaire(BaseModel):
     prenom: Optional[str] = None  # 12
     nom: Optional[str] = None  # 13
 
-    def is_ok(self) -> bool:
-        return bool(self.ligne1 or (self.prenom and self.nom))
+    @model_validator(mode="after")
+    def check_beneficiaire(self) -> "Beneficiaire":
+        if not (self.ligne1 or (self.prenom and self.nom)):
+            raise ValueError("Bénéficiaire invalide (ID 10 ou 12+13 obligatoire)")
+        return self
 
 
 # -----------------------------
@@ -98,15 +102,16 @@ class BulletinSalaire(BaseModel):
             type_contrat_map.get(type_contrat_raw) if type_contrat_raw else None
         )
 
-        obj = cls(
+        # On laisse Pydantic lever une ValidationError si les champs obligatoires sont None ou invalides
+        return cls(
             doc_type=cast(Literal["06"], d.header.doc_type),
             beneficiaire=benef,
-            siret_employeur=f.get("50", ""),
-            debut_periode=to_date_hex(f.get("53")) or date(2000, 1, 1),
-            fin_periode=to_date_hex(f.get("54")) or date(2000, 1, 1),
-            debut_contrat=to_date_ddmmyyyy(f.get("55")) or date(2000, 1, 1),
-            salaire_net_imposable=to_dec(f.get("58")) or Decimal("0"),
-            cumul_salaire_net_imposable=to_dec(f.get("59")) or Decimal("0"),
+            siret_employeur=f.get("50"),
+            debut_periode=to_date_hex(f.get("53")),
+            fin_periode=to_date_hex(f.get("54")),
+            debut_contrat=to_date_ddmmyyyy(f.get("55")),
+            salaire_net_imposable=to_dec(f.get("58")),
+            cumul_salaire_net_imposable=to_dec(f.get("59")),
             nombre_heures_travaillees=to_dec(f.get("51")),
             cumul_heures_travaillees=to_dec(f.get("52")),
             date_signature_contrat=to_date_ddmmyyyy(f.get("57")),
@@ -118,22 +123,6 @@ class BulletinSalaire(BaseModel):
             duree_contrat=f.get("5U"),
             extras=extras,
         )
-        obj.validate_required_fields()
-        return obj
-
-    def validate_required_fields(self) -> None:
-        if not self.beneficiaire.is_ok():
-            raise ValueError("Bénéficiaire invalide (10 ou 11+12+13 obligatoire)")
-        if not self.siret_employeur:
-            raise ValueError("SIRET employeur (50) obligatoire")
-        if self.debut_periode == date(2000, 1, 1) and "53" not in self.extras:
-            # to_date_hex returns None if input is None, we default to 2000-01-01 to satisfy Pydantic if not optional
-            # But here we want to check if it was actually provided.
-            pass  # Will be handled by Pydantic if I change the types to Optional and check manually
-
-        # Better: let's use Optional in the model and check in validate_required_fields
-        # Or just use Pydantic mandatory fields.
-        # I'll stick to the style of doc28.
 
     @property
     def nom_beneficiaire(self) -> Optional[str]:
