@@ -1,6 +1,6 @@
 # -----------------------------
 # Helpers de conversion
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -31,6 +31,16 @@ def to_date_ddmmyyyy(s: Optional[str]) -> Optional[date]:
         return datetime.strptime(s, "%d%m%Y").date()
     except ValueError:
         return None
+
+
+def to_date_hex(hex_days: Optional[str]) -> Optional[date]:
+    if not hex_days or hex_days.upper() == "FFFF":
+        return None
+    try:
+        days = int(hex_days, 16)
+    except ValueError:
+        return None
+    return date(2000, 1, 1) + timedelta(days=days)
 
 
 def format_name(s: Optional[str]) -> Optional[str]:
