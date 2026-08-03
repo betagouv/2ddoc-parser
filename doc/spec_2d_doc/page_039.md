@@ -1,63 +1,42 @@
-République française
-Liberté
-Égalité
-Fraternité
-
-France
-Titres
-
+RÉPUBLIQUE FRANÇAISE
+Liberté Égalité Fraternité
+France Titres
 Spécifications Techniques
+Date : 24/07/2026
+V 3.3.9
+Diffusion : Public
+Direction de la Circulation et des Applications Transverses
 
-Date: 11/03/2026
-V 3.3.7.2
-Diffusion: Public
-Direction de la Circulation et
-des Applications Transverses
-
-# 6. Annexe : Types de documents
-
-## 6.1. Périmètre C40 '01'
-
-Les différents types de documents intégrés dans cette version de la spécification pour le périmètre '01' au format C40 sont les suivants :
-
-|  Type pour l'utilisateur | Code | Date d'émission | Type pour l'émetteur  |
-| --- | --- | --- | --- |
-|  Justificatif de domicile | 00 | O | - Document émis spécifiquement pour servir de justificatif de domicile.  |
-|   |  01 | O | - Factures de fournisseur d'énergie
-- Factures de téléphonie
-- Factures de fournisseur d'accès internet
-- Factures de fournisseur d'eau  |
-|   |  02 | O | - Avis de taxe d'habitation  |
-|   |  03 | N | - Relevé d'identité bancaire.  |
-|  Documents bancaires | 05 | N | - Relevé d'identité bancaire.  |
-|   |  11 | O | - Relevé de compte  |
-|  Justificatif fiscal | 09 | O | - Facture étendue  |
-|   |  19 | N | - Déclarations de dons  |
-|   |  20 | N | - Déclarations de cession de droits sociaux  |
-|   |  21 | N | - Attestation 2041-ASK  |
-|  Justificatif de ressources | 04 | N | - Avis d'impôt sur les Revenus  |
-|   |  06 | O | - Bulletin de salaire  |
-|   |  18 | N | - Avis de Situation Déclarative à l'Impôt sur les Revenus  |
-|   |  24 | N | - Avis de Situation Déclarative à l'Impôt sur les Revenus (V2)  |
-|   |  27 | N | - Avis de Situation Déclarative à l'Impôt sur les Revenus (V3)  |
-|   |  28 | N | - Avis d'impôt sur les Revenus (V2)  |
-|  Justificatif d'emploi | 10 | O | - Contrat de travail  |
-|   |  15 | O | - Attestation de décision favorable d'une demande d'autorisation de travail  |
-|   |  25 | O | - Autorisation de Travail – AES Métier en Tension  |
-|  Justificatif d'identité | 07 | O | - Titre d'identité  |
-|   |  08 | O | - MRZ  |
-|   |  13 | O | - Document étranger  |
-|  Justificatif de véhicule | A0 | O | - Certificat de qualité de l'air  |
-|   |  A7 | O | - Certificat de qualité de l'air (V2)  |
-|   |  14 | O | - Attestation DICEM  |
-|  Certificat d'immatriculation | A8 | O | - Certificat de cession électronique  |
-|  Justificatif permis de conduire | A1 | O | - Courrier Permis à Points  |
-|   |  AA | O | - Arrêtés Permis de conduire  |
-|   |  AB | O | - Relevé d'Information Permis de conduire  |
-|   |  AD | O | - Certificat de réussite à l'Examen du Permis de Conduire (CEPC)  |
-|  Justificatif académique | B0 | O | - Diplôme  |
-|   |  B1 | O | - Attestation de Versement de la Contribution à la Vie Etudiante  |
 |  Justificatif médical | A4 | O | - Certificat de décès  |
+| --- | --- | --- | --- |
 |   |  AE | O | - Certificat de décès V2  |
+|  Justificatif de santé | A2 | O | - Carte Mobilité Inclusion (CMI)  |
+|   |  23 | O | - Certificat de Preuve de Vie  |
+|  Justificatif d'activité | A3 | N | - Macaron VTC<br>(Véhicule de Transport avec Chauffeur)  |
+|   |  A5 | N | - Carte T3P<br>(Transport Public Particulier de Personnes)  |
+|   |  A6 | N | - Carte Professionnelle Sapeur-Pompier  |
+|   |  A9 | O | - Permis de chasser  |
+|   |  AC | O | - Licence de conducteur de train  |
+|  Justificatif juridique/judiciaire | 12 | O | - Acte d'huissier  |
+|  Autorisations douanières | 22 | N | - Carte Européenne d'Arme à Feu (CEAF)  |
+|   |  C1 | O | - Renseignement Tarifaire Contraignant  |
+|   |  C2 | O | - Accord Préalable pour le transfert d'armes  |
+|   |  C3 | O | - Permis de transfert d'armes à feu<br>et de munitions  |
+|   |  C4 | O | - Autorisation d'importation de matériels de guerre  |
+|   |  C5 | O | - Licence d'exportation d'armes à feu  |
+|   |  C6 | O | - Agrément de transfert d'armes à feu<br>et de munitions  |
+|   |  C7 | O | - Bon de livraison  |
+|   |  C8 | O | - Bon de livraison V2  |
+|  Résultats des tests virologiques | B2 | O | - Test COVID  |
+|   |  B3 | O | - Titrage antirabique  |
+|  Attestation Vaccinale | L1 | O | - Attestation Vaccinale  |
+|  Justificatif d'Asile | 16 | N | - Attestation de Demande d'Asile  |
+|   |  17 | O | - Attestation de fin de droit à l'allocation pour demandeur d'asile (ADA)  |
+|  Caducée Infirmier | C9 | O | - Caducée Infirmier  |
+|  Certificat de conformité | 26 | O | - Certificat de conformité sûreté aéroportuaire  |
 
-Page 38 | 242
+La colonne Code indique l'identifiant à placer dans l'en-tête du code 2D-DOC.
+
+La colonne Date d'émission indique (O) pour la nécessité de définir la date d'émission dans l'en-tête du code ou (N) si aucune date ne doit être mentionnée et que la chaîne FFFF doit y être placée.
+
+Page 39 | 246
