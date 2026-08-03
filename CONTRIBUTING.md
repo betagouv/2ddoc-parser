@@ -17,16 +17,18 @@ from datetime import date
 from typing import Optional, Dict, Literal
 from pydantic import BaseModel, Field
 
+
 class MonDocument(BaseModel):
     """Modèle typé pour [Description du document] (type XX)."""
+
     doc_type: Literal["XX"]
 
     # Champs obligatoires
-    nom: str                    # ID_CHAMP (O)
-    date_emission: date         # ID_CHAMP (O)
+    nom: str  # ID_CHAMP (O)
+    date_emission: date  # ID_CHAMP (O)
 
     # Champs facultatifs
-    numero: Optional[str] = None # ID_CHAMP (F)
+    numero: Optional[str] = None  # ID_CHAMP (F)
 
     # Champs supplémentaires non mappés
     extras: Dict[str, str] = Field(default_factory=dict)

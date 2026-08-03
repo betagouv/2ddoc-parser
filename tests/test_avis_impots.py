@@ -2,14 +2,15 @@
 Tests unitaires pour le décodage des 2D-DOC de type avis d'impôts (type 28).
 """
 
-import pytest
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from fr_2ddoc_parser.api import decode_2d_doc
-from fr_2ddoc_parser.type.doc04_avis_impots import AvisImpositionV1
-from fr_2ddoc_parser.type.doc28_avis_impots import AvisImposition, AdresseImposition
 from fr_2ddoc_parser.exception.exceptions import TwoDDocFormatError
+from fr_2ddoc_parser.type.doc04_avis_impots import AvisImpositionV1
+from fr_2ddoc_parser.type.doc28_avis_impots import AdresseImposition, AvisImposition
 
 
 class TestAvisImpots:

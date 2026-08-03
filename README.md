@@ -50,9 +50,9 @@ raw_2d_doc = "DC04FR000001FFFF23DC2801FR432,75<GS>44227801234567845202146RETI PA
 result = decode_2d_doc(raw_2d_doc)
 
 # Résultat
-print(result.header.doc_type)        # "28" (Avis d'impôts)
-print(result.is_valid)                # True si la signature est valide
-print(result.typed)                   # Objet typé selon le type de document
+print(result.header.doc_type)  # "28" (Avis d'impôts)
+print(result.is_valid)  # True si la signature est valide
+print(result.typed)  # Objet typé selon le type de document
 ```
 
 ### Structure du résultat
@@ -61,15 +61,15 @@ Le résultat retourné est un objet `Decoded2DDoc` contenant :
 
 #### 1. **header** : En-tête DC04
 ```python
-result.header.marker         # "DC" (identifiant 2D-DOC)
-result.header.version        # 4 (version du format)
-result.header.doc_type       # Type de document (ex: "28" pour avis d'impôts)
-result.header.perimeter      # Périmètre (ex: "01")
-result.header.country        # Pays (ex: "FR")
-result.header.ca_id          # ID de l'autorité de certification (ex: "FR06")
-result.header.cert_id        # ID du certificat
-result.header.issue_date     # Date d'émission (objet date)
-result.header.signature_date # Date de signature (objet date)
+result.header.marker  # "DC" (identifiant 2D-DOC)
+result.header.version  # 4 (version du format)
+result.header.doc_type  # Type de document (ex: "28" pour avis d'impôts)
+result.header.perimeter  # Périmètre (ex: "01")
+result.header.country  # Pays (ex: "FR")
+result.header.ca_id  # ID de l'autorité de certification (ex: "FR06")
+result.header.cert_id  # ID du certificat
+result.header.issue_date  # Date d'émission (objet date)
+result.header.signature_date  # Date de signature (objet date)
 ```
 
 #### 2. **fields** : Champs bruts (dict)
@@ -80,20 +80,20 @@ result.fields  # Dict[str, str] - Tous les champs parsés
 
 #### 3. **signature** : Bloc de signature
 ```python
-result.signature.present     # True si une signature est présente
-result.signature.raw         # bytes - Signature brute
-result.signature.alg_hint    # Algorithme détecté (P-256, P-384, P-521)
+result.signature.present  # True si une signature est présente
+result.signature.raw  # bytes - Signature brute
+result.signature.alg_hint  # Algorithme détecté (P-256, P-384, P-521)
 ```
 
 #### 4. **typed** : Données typées (selon le type de document)
 ```python
 result.typed  # Objet spécifique au type de document
 # Pour un avis d'impôts (type 28) :
-result.typed.annee_revenue                # 2024
-result.typed.reference_avis               # "1442569"
-result.typed.declarant1                   # "DOE JOHN"
+result.typed.annee_revenue  # 2024
+result.typed.reference_avis  # "1442569"
+result.typed.declarant1  # "DOE JOHN"
 result.typed.revenue_fiscal_de_reference  # 30000
-result.typed.adresse.full                 # "123 RUE DE PARIS, 75001 PARIS"
+result.typed.adresse.full  # "123 RUE DE PARIS, 75001 PARIS"
 ```
 
 #### 5. **is_valid** : Validité de la signature
@@ -113,19 +113,21 @@ result = decode_2d_doc(raw)
 # Vérifier le type de document
 if result.header.doc_type == "28":
     avis = result.typed  # AvisImposition
-    
+
     print(f"Année des revenus : {avis.annee_revenue}")
     print(f"Référence : {avis.reference_avis}")
     print(f"Déclarant : {avis.declarant1}")
     print(f"Revenu fiscal de référence : {avis.revenue_fiscal_de_reference} €")
     print(f"Nombre de parts : {avis.nombre_parts}")
-    
+
     # Adresse
     if avis.adresse.full:
         print(f"Adresse : {avis.adresse.full}")
     else:
-        print(f"Adresse : {avis.adresse.voie}, {avis.adresse.code_postal} {avis.adresse.commune}")
-    
+        print(
+            f"Adresse : {avis.adresse.voie}, {avis.adresse.code_postal} {avis.adresse.commune}"
+        )
+
     # Signature valide ?
     if result.is_valid:
         print("✅ Signature valide")
@@ -140,7 +142,7 @@ from fr_2ddoc_parser.api import decode_2d_doc
 from fr_2ddoc_parser.exception.exceptions import (
     TwoDDocFormatError,
     TwoDDocUnsupportedVersion,
-    TwoDDocSignatureError
+    TwoDDocSignatureError,
 )
 
 try:
@@ -308,9 +310,9 @@ img = Image.open("avis_impots.jpg")
 barcodes = decode(img)
 
 for barcode in barcodes:
-    if barcode.type == 'DATAMATRIX':
-        raw_data = barcode.data.decode('utf-8')
-        
+    if barcode.type == "DATAMATRIX":
+        raw_data = barcode.data.decode("utf-8")
+
         # Décoder le 2D-DOC
         result = decode_2d_doc(raw_data)
         print(result.typed)

@@ -33,6 +33,10 @@ packages = ["src/fr_2ddoc_parser"]
 target-version = "py313"
 line-length = 88
 
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

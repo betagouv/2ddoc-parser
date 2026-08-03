@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Dict, Literal, Optional, cast
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -21,19 +21,19 @@ class AvisImpositionV1(BaseModel):
     reference_avis: str  # 44
     annee_des_revenus: int  # 45
     declarant_1: str  # 46
-    revenu_fiscal_de_reference: Optional[int] = None  # 41 (F)
-    declarant_1_numero_fiscal: Optional[str] = None  # 47 (F)
-    declarant_2: Optional[str] = None  # 48 (F)
-    declarant_2_numero_fiscal: Optional[str] = None  # 49 (F)
-    date_mise_en_recouvrement: Optional[date] = None  # 4A
+    revenu_fiscal_de_reference: int | None = None  # 41 (F)
+    declarant_1_numero_fiscal: str | None = None  # 47 (F)
+    declarant_2: str | None = None  # 48 (F)
+    declarant_2_numero_fiscal: str | None = None  # 49 (F)
+    date_mise_en_recouvrement: date | None = None  # 4A
 
     # Champs supplémentaires non cartographiés
-    extras: Dict[str, str] = Field(default_factory=dict)
+    extras: dict[str, str] = Field(default_factory=dict)
 
     # -------------------------
     # Construction depuis Decoded2DDoc
     @classmethod
-    def from_decoded(cls, d: Decoded2DDoc) -> "AvisImpositionV1":
+    def from_decoded(cls, d: Decoded2DDoc) -> AvisImpositionV1:
         f = d.fields
         known = {"41", "43", "44", "45", "46", "47", "48", "49", "4A"}
 
@@ -42,7 +42,7 @@ class AvisImpositionV1(BaseModel):
         obj = cls(
             doc_type=cast(Literal["04"], d.header.doc_type),
             revenu_fiscal_de_reference=to_int(f.get("41")),
-            nombre_de_parts=cast(Decimal, to_dec(f.get("43")) or Decimal("0")),
+            nombre_de_parts=cast(Decimal, to_dec(f.get("43")) or Decimal(0)),
             reference_avis=f.get("44", "").strip(),
             annee_des_revenus=cast(int, to_int(f.get("45")) or 0),
             declarant_1=f.get("46", "").strip(),
