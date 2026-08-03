@@ -8,9 +8,9 @@ from fr_2ddoc_parser.type.doc29_attestation_activite_professionnelle import (
 
 
 def test_decode_attestation_activite_professionnelle():
-    """Test le décodage d'un 2D-DOC de type 29 (Attestation d'Activité Professionnelle)
+    """Teste le décodage d'un 2D-DOC de type 29 (Attestation d'Activité Professionnelle)
 
-    contient l'ensemble des champs obligatoires et facultatifs avec des données ficitives.
+    Contient l'ensemble des champs obligatoires et facultatifs avec des données fictives.
     """
     raw_msg = (
         "DC04FR06PND025ED25ED2901FR"
