@@ -65,7 +65,7 @@ def _handle_xx(doc: Decoded2DDoc) -> MonDocument:
 ## 🧪 Lancer les tests
 
 ```bash
-poetry run pytest tests/test_docXX.py
+uv run pytest tests/test_docXX.py
 ```
 
 ## 📜 Règles de codage

@@ -1,7 +1,7 @@
 # 2ddoc-parser
 
 [![Python Version](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
-[![Poetry](https://img.shields.io/badge/package%20manager-poetry-blue)](https://python-poetry.org/)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
 Bibliothèque Python pour décoder et vérifier les **2D-DOC** de l'ANTS (Agence Nationale des Titres Sécurisés).
 
@@ -12,10 +12,10 @@ Les 2D-DOC sont des codes-barres 2D (DataMatrix) présents sur de nombreux docum
 
 ## 🚀 Installation
 
-### Avec Poetry (recommandé)
+### Avec uv (recommandé)
 
 ```bash
-poetry add git+https://github.com/betagouv/2ddoc-parser.git
+uv add git+https://github.com/betagouv/2ddoc-parser.git
 ```
 
 ### Avec pip
@@ -27,8 +27,8 @@ pip install git+https://github.com/betagouv/2ddoc-parser.git
 ### Installation d'une version spécifique (tag)
 
 ```bash
-# Avec Poetry
-poetry add git+https://github.com/betagouv/2ddoc-parser.git#v1.0.0
+# Avec uv
+uv add git+https://github.com/betagouv/2ddoc-parser.git#v1.0.0
 
 # Avec pip
 pip install git+https://github.com/betagouv/2ddoc-parser.git@v1.0.0
@@ -255,16 +255,16 @@ fr_2ddoc_parser/
 
 ```bash
 # Lancer tous les tests
-poetry run pytest
+uv run pytest
 
 # Tests avec verbose
-poetry run pytest -v
+uv run pytest -v
 
 # Tests d'un fichier spécifique
-poetry run pytest tests/test_avis_impots.py
+uv run pytest tests/test_avis_impots.py
 
 # Coverage
-poetry run pytest --cov=fr_2ddoc_parser
+uv run pytest --cov=fr_2ddoc_parser
 ```
 
 ## 🤝 Contribution
