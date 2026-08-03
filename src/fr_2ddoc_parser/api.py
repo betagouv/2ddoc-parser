@@ -1,14 +1,14 @@
 from __future__ import annotations
+
 import importlib
 import pkgutil
-from typing import Optional
 
+import fr_2ddoc_parser.type as _types_pkg
 from fr_2ddoc_parser.crypto.key_resolver import local_key_resolver
 from fr_2ddoc_parser.model.models import Decoded2DDoc
 from fr_2ddoc_parser.parser.parser import parse
-from fr_2ddoc_parser.registry.registry import get_handler, TypeHandler
+from fr_2ddoc_parser.registry.registry import TypeHandler, get_handler
 from fr_2ddoc_parser.type.base import GenericDoc
-import fr_2ddoc_parser.type as _types_pkg
 
 _handlers_loaded = False
 
@@ -38,9 +38,9 @@ def decode_2d_doc(data: str) -> Decoded2DDoc:
     """
     parsed_data = parse(data)
     _ensure_handlers_loaded()
-    tuple: Optional[tuple[TypeHandler, str]] = get_handler(parsed_data.header.doc_type)
-    detected_handler: Optional[TypeHandler] = None
-    handler_name: Optional[str] = None
+    tuple: tuple[TypeHandler, str] | None = get_handler(parsed_data.header.doc_type)
+    detected_handler: TypeHandler | None = None
+    handler_name: str | None = None
     if tuple is not None:
         detected_handler, handler_name = tuple
     if detected_handler:
@@ -57,5 +57,4 @@ def decode_2d_doc(data: str) -> Decoded2DDoc:
         parsed_data.verify(key_resolver=local_key_resolver)
     except Exception as e:
         print(f"Warning: signature verification failed: {e}")
-        pass
     return parsed_data

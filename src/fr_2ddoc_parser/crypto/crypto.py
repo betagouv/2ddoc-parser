@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, rsa, padding
-from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from cryptography.exceptions import InvalidSignature
-
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 # Les signatures 2D-DOC sont au format (r||s) en binaire. La lib cryptography
 # attend ASN.1 DER (r,s). On convertit.

@@ -41,7 +41,7 @@ Ce skill permet d'automatiser l'intégration d'un nouveau type de document 2D-DO
 - Mettre à jour le fichier `README.md` dans la section "Types implémentés" en ajoutant une nouvelle ligne pour le type de document fraîchement ajouté.
 
 ### 6. Validation et Commit
-- Exécuter le test avec `poetry run pytest tests/test_doc[CODE].py`.
+- Exécuter le test avec `uv run pytest tests/test_doc[CODE].py`.
 - Si le test passe, effectuer un commit de tous les changements sur la branche :
     - `git add .`
     - `git commit -m "feat: add support for 2D-DOC type [CODE] ([NOM])"`
@@ -51,4 +51,4 @@ Ce skill permet d'automatiser l'intégration d'un nouveau type de document 2D-DO
 - Respecter le style existant (Pydantic v2, typage strict).
 - Utiliser des noms de variables en français pour coller à la nomenclature de l'ANTS si nécessaire.
 - **Ne jamais modifier manuellement le fichier `registry.py`**; l'utilisation du décorateur `@register` dans le nouveau modèle suffit à l'enregistrement automatique du type.
-- Avant de pousser du code il faut s'assurer que le formattage est bon avec `poetry run ruff format`
+- Avant de pousser du code il faut s'assurer que le formattage est bon avec `uv run ruff format`

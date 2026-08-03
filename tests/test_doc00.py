@@ -72,8 +72,8 @@ class TestJustificatifDomicile:
             # On simule un Decoded2DDoc manuellement ou on passe par from_decoded avec un mock
             # Pour faire simple, on teste via JustificatifDomicile directement
             from fr_2ddoc_parser.model.models import (
-                Header,
                 Decoded2DDoc,
+                Header,
                 SignatureBlock,
             )
 
@@ -101,7 +101,7 @@ class TestJustificatifDomicile:
 
     def test_interchangeable_identity(self):
         """Test que l'identité via 11+12+13 fonctionne aussi."""
-        from fr_2ddoc_parser.model.models import Header, Decoded2DDoc, SignatureBlock
+        from fr_2ddoc_parser.model.models import Decoded2DDoc, Header, SignatureBlock
 
         h = Header(
             raw="",

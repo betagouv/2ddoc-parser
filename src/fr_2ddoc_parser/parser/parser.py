@@ -3,13 +3,12 @@ from __future__ import annotations
 import base64
 import re
 from datetime import date, timedelta
-from typing import Dict, Optional
 
 from fr_2ddoc_parser.exception.exceptions import (
     TwoDDocFormatError,
     TwoDDocUnsupportedVersion,
 )
-from fr_2ddoc_parser.model.models import GS, US, Header, Decoded2DDoc, SignatureBlock
+from fr_2ddoc_parser.model.models import GS, US, Decoded2DDoc, Header, SignatureBlock
 from fr_2ddoc_parser.parser.spec import SPEC_2D
 
 # Record Separator (truncation marker)
@@ -53,7 +52,7 @@ def _b32_fixpad(s: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Dates (jours hex depuis 2000-01-01) dans l’en-tête DC04
-def _days_hex_to_date(hex_days: str) -> Optional[date]:
+def _days_hex_to_date(hex_days: str) -> date | None:
     if hex_days.upper() == "FFFF":
         return None
     try:
@@ -125,7 +124,7 @@ def parse_header(data: str) -> Header:
 
 # ---------------------------------------------------------------------------
 # Séparation payload / signature (US)
-def split_payload_and_signature(s: str) -> tuple[str, Optional[str]]:
+def split_payload_and_signature(s: str) -> tuple[str, str | None]:
     if US in s:
         left, right = s.split(US, 1)
         sig = right.strip() or None
@@ -180,8 +179,8 @@ def _read_variable(
 
 # ---------------------------------------------------------------------------
 # Parser champs générique basé sur SPEC_INDEX
-def parse_fields(payload: str) -> Dict[str, str]:
-    out: Dict[str, str] = {}
+def parse_fields(payload: str) -> dict[str, str]:
+    out: dict[str, str] = {}
     i = 0
     n = len(payload)
 
