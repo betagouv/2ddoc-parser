@@ -181,6 +181,7 @@ Cette bibliothèque supporte les versions **2, 3 et 4** du format 2D-DOC.
 | **06** | Bulletin de salaire | `BulletinSalaire` | v2, v3, v4 |
 | **07** | Titre d'identité | `CarteIdentite` | v2, v3, v4 |
 | **28** | Avis d'impôts sur le revenu (Nouveau format) | `AvisImposition` | v2, v3, v4 |
+| **29** | Attestation d'activité professionnelle | `AttestationActiviteProfessionnelle` | v2, v3, v4 |
 | _Autres_ | Document générique | `GenericDoc` | v2, v3, v4 |
 
 Pour ajouter de nouveaux types de documents, consultez le [CONTRIBUTING.md](CONTRIBUTING.md).
