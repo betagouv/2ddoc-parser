@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Dict, Literal, Optional, cast
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -23,13 +23,13 @@ class Beneficiaire(BaseModel):
     Règle métier : 10 ou (12 et 13) obligatoire.
     """
 
-    ligne1: Optional[str] = None  # 10
-    qualite: Optional[str] = None  # 11
-    prenom: Optional[str] = None  # 12
-    nom: Optional[str] = None  # 13
+    ligne1: str | None = None  # 10
+    qualite: str | None = None  # 11
+    prenom: str | None = None  # 12
+    nom: str | None = None  # 13
 
     @model_validator(mode="after")
-    def check_beneficiaire(self) -> "Beneficiaire":
+    def check_beneficiaire(self) -> Beneficiaire:
         if not (self.ligne1 or (self.prenom and self.nom)):
             raise ValueError("Bénéficiaire invalide (ID 10 ou 12+13 obligatoire)")
         return self
@@ -50,21 +50,21 @@ class BulletinSalaire(BaseModel):
     salaire_net_imposable: Decimal  # 58 (O)
     cumul_salaire_net_imposable: Decimal  # 59 (O)
 
-    nombre_heures_travaillees: Optional[Decimal] = None  # 51 (F)
-    cumul_heures_travaillees: Optional[Decimal] = None  # 52 (F)
-    date_signature_contrat: Optional[date] = None  # 57 (F)
-    salaire_brut_mensuel: Optional[Decimal] = None  # 5A (F)
-    denomination_sociale: Optional[str] = None  # 5M (F)
-    nom_employeur: Optional[str] = None  # 5O (F)
-    prenom_employeur: Optional[str] = None  # 5P (F)
-    type_contrat: Optional[str] = None  # 5T (F)
-    duree_contrat: Optional[str] = None  # 5U (F)
+    nombre_heures_travaillees: Decimal | None = None  # 51 (F)
+    cumul_heures_travaillees: Decimal | None = None  # 52 (F)
+    date_signature_contrat: date | None = None  # 57 (F)
+    salaire_brut_mensuel: Decimal | None = None  # 5A (F)
+    denomination_sociale: str | None = None  # 5M (F)
+    nom_employeur: str | None = None  # 5O (F)
+    prenom_employeur: str | None = None  # 5P (F)
+    type_contrat: str | None = None  # 5T (F)
+    duree_contrat: str | None = None  # 5U (F)
 
     # Champs supplémentaires non cartographiés
-    extras: Dict[str, str] = Field(default_factory=dict)
+    extras: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
-    def from_decoded(cls, d: Decoded2DDoc) -> "BulletinSalaire":
+    def from_decoded(cls, d: Decoded2DDoc) -> BulletinSalaire:
         f = d.fields
         benef = Beneficiaire(
             ligne1=f.get("10"),
@@ -125,7 +125,7 @@ class BulletinSalaire(BaseModel):
         )
 
     @property
-    def nom_beneficiaire(self) -> Optional[str]:
+    def nom_beneficiaire(self) -> str | None:
         if self.beneficiaire.ligne1:
             return format_name(self.beneficiaire.ligne1)
         if self.beneficiaire.nom:

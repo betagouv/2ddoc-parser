@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict, Literal, Optional, cast
+from typing import Literal, cast
+
+from pydantic import BaseModel, Field
 
 from fr_2ddoc_parser.model.models import Decoded2DDoc
 from fr_2ddoc_parser.parser.helper import to_date_ddmmyyyy
 from fr_2ddoc_parser.registry.registry import register
-from pydantic import BaseModel, Field
 
 
 # -----------------------------
@@ -24,13 +25,13 @@ class AdresseIdentite(BaseModel):
     - 6Y : Code pays (F)
     """
 
-    ligne_2: Optional[str] = None  # 6S
-    ligne_3: Optional[str] = None  # 6T
-    voie: Optional[str] = None  # 6U
-    lieu_dit: Optional[str] = None  # 6V
-    code_postal: Optional[str] = None  # 6W
-    commune: Optional[str] = None  # 6X
-    pays: Optional[str] = None  # 6Y
+    ligne_2: str | None = None  # 6S
+    ligne_3: str | None = None  # 6T
+    voie: str | None = None  # 6U
+    lieu_dit: str | None = None  # 6V
+    code_postal: str | None = None  # 6W
+    commune: str | None = None  # 6X
+    pays: str | None = None  # 6Y
 
 
 # -----------------------------
@@ -42,31 +43,31 @@ class CarteIdentite(BaseModel):
 
     # Données Personnelles
     liste_prenoms: str  # 60
-    prenom: Optional[str] = None  # 61
-    nom_patronymique: Optional[str] = None  # 62
-    nom_usage: Optional[str] = None  # 63
+    prenom: str | None = None  # 61
+    nom_patronymique: str | None = None  # 62
+    nom_usage: str | None = None  # 63
     type_piece_identite: str  # 65
     numero_document: str  # 66
     nationalite: str  # 67
     genre: str  # 68
-    date_naissance: Optional[date] = None  # 69
-    lieu_naissance: Optional[str] = None  # 6A
+    date_naissance: date | None = None  # 69
+    lieu_naissance: str | None = None  # 6A
     pays_naissance: str  # 6C
 
     # Données Document
-    mrz: Optional[str] = None  # 6F
-    date_debut_validite: Optional[date] = None  # 6N
-    date_fin_validite: Optional[date] = None  # 6O
+    mrz: str | None = None  # 6F
+    date_debut_validite: date | None = None  # 6N
+    date_fin_validite: date | None = None  # 6O
 
     adresse: AdresseIdentite = Field(default_factory=AdresseIdentite)
 
     # Champs supplémentaires non cartographiés
-    extras: Dict[str, str] = Field(default_factory=dict)
+    extras: dict[str, str] = Field(default_factory=dict)
 
     # -------------------------
     # Construction depuis Decoded2DDoc
     @classmethod
-    def from_decoded(cls, d: Decoded2DDoc) -> "CarteIdentite":
+    def from_decoded(cls, d: Decoded2DDoc) -> CarteIdentite:
         f = d.fields
         adresse = AdresseIdentite(
             ligne_2=f.get("6S"),

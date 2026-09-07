@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Callable, Dict, Optional, Any
+from collections.abc import Callable
+from typing import Any
+
 from pydantic import BaseModel
 
 from fr_2ddoc_parser.model.models import Decoded2DDoc
@@ -17,12 +19,12 @@ class TypeInfo(BaseModel):
 
 class TypeRegistry:
     def __init__(self):
-        self._handlers: Dict[str, tuple[TypeHandler, str]] = {}
+        self._handlers: dict[str, tuple[TypeHandler, str]] = {}
 
     def register(self, code: str, handler: TypeHandler, name: str):
         self._handlers[code.upper()] = (handler, name)
 
-    def get(self, code: str) -> Optional[tuple[TypeHandler, str]]:
+    def get(self, code: str) -> tuple[TypeHandler, str] | None:
         return self._handlers.get(code.upper())
 
 
@@ -38,5 +40,5 @@ def register(code: str, name: str):
     return deco
 
 
-def get_handler(code: str) -> Optional[tuple[TypeHandler, str]]:
+def get_handler(code: str) -> tuple[TypeHandler, str] | None:
     return _registry.get(code)

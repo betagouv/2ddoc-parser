@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Dict, Literal, Optional, cast
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -20,12 +20,12 @@ class AdresseImposition(BaseModel):
     6V (complément) reste facultatif.
     """
 
-    full: Optional[str] = None  # 4Y
-    voie: Optional[str] = None  # 6U
-    complement: Optional[str] = None  # 6V
-    code_postal: Optional[str] = None  # 6W
-    commune: Optional[str] = None  # 6X
-    pays: Optional[str] = None  # 6Y
+    full: str | None = None  # 4Y
+    voie: str | None = None  # 6U
+    complement: str | None = None  # 6V
+    code_postal: str | None = None  # 6W
+    commune: str | None = None  # 6X
+    pays: str | None = None  # 6Y
 
     def is_ok_28(self) -> bool:
         struct_ok = bool(self.voie and self.code_postal and self.commune and self.pays)
@@ -42,24 +42,24 @@ class AvisImposition(BaseModel):
     reference_avis: str  # 44
     annee_des_revenus: int  # 45
     declarant_1: str  # 46
-    revenu_fiscal_de_reference: Optional[int] = None  # 41 (F)
-    declarant_1_numero_fiscal: Optional[str] = None  # 47 (F)
-    declarant_2: Optional[str] = None  # 48 (F)
-    declarant_2_numero_fiscal: Optional[str] = None  # 49 (F)
-    date_mise_en_recouvrement: Optional[date] = None  # 4A
-    impot_revenu_net: Optional[int] = None  # 4V (F)
-    reste_a_payer: Optional[int] = None  # 4W (F)
-    retenue_a_la_source: Optional[int] = None  # 4X (F)
+    revenu_fiscal_de_reference: int | None = None  # 41 (F)
+    declarant_1_numero_fiscal: str | None = None  # 47 (F)
+    declarant_2: str | None = None  # 48 (F)
+    declarant_2_numero_fiscal: str | None = None  # 49 (F)
+    date_mise_en_recouvrement: date | None = None  # 4A
+    impot_revenu_net: int | None = None  # 4V (F)
+    reste_a_payer: int | None = None  # 4W (F)
+    retenue_a_la_source: int | None = None  # 4X (F)
 
     adresse: AdresseImposition = Field(default_factory=AdresseImposition)
 
     # Champs supplémentaires non cartographiés
-    extras: Dict[str, str] = Field(default_factory=dict)
+    extras: dict[str, str] = Field(default_factory=dict)
 
     # -------------------------
     # Construction depuis Decoded2DDoc
     @classmethod
-    def from_decoded(cls, d: Decoded2DDoc) -> "AvisImposition":
+    def from_decoded(cls, d: Decoded2DDoc) -> AvisImposition:
         f = d.fields
         adresse = AdresseImposition(
             full=f.get("4Y"),
@@ -95,7 +95,7 @@ class AvisImposition(BaseModel):
         obj = cls(
             doc_type=cast(Literal["28"], d.header.doc_type),
             revenu_fiscal_de_reference=to_int(f.get("41")),
-            nombre_de_parts=cast(Decimal, to_dec(f.get("43")) or Decimal("0")),
+            nombre_de_parts=cast(Decimal, to_dec(f.get("43")) or Decimal(0)),
             reference_avis=f.get("44", "").strip(),
             annee_des_revenus=cast(int, to_int(f.get("45")) or 0),
             declarant_1=f.get("46", "").strip(),

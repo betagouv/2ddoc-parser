@@ -1,24 +1,22 @@
 from __future__ import annotations
-from typing import Dict, Iterable, Optional, Tuple, Union, IO, List, Set
+
 import base64
 import datetime as dt
+import hashlib
 import re
+import urllib.parse
+import urllib.request
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
+from html import unescape
+from importlib.resources import files
+from typing import IO, cast
 
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.x509.extensions import SubjectKeyIdentifier
 from cryptography.x509.oid import ExtensionOID
-import hashlib
-from typing import cast
-
 from pydantic import BaseModel, ConfigDict
-
-import urllib.request
-import urllib.parse
-from html import unescape
-
-from importlib.resources import files
 
 from fr_2ddoc_parser.crypto.helper import _scan_der_certs
 
@@ -39,10 +37,10 @@ class _CertRecord(BaseModel):
     ca_id: str  # "FR01", "FR03", …
     pem_der: bytes  # DER du X.509 publié dans la TSL
     cert: x509.Certificate
-    status_start: Optional[dt.datetime]
+    status_start: dt.datetime | None
 
 
-def _first(txts: Iterable[str | None]) -> Optional[str]:
+def _first(txts: Iterable[str | None]) -> str | None:
     for t in txts:
         if t:
             return t
@@ -104,7 +102,7 @@ def _parse_any_certs(data: bytes) -> list[x509.Certificate]:
     return scanned
 
 
-def _fetch_bytes(url: str, timeout: int = 10) -> Optional[bytes]:
+def _fetch_bytes(url: str, timeout: int = 10) -> bytes | None:
     try:
         req = urllib.request.Request(
             url, headers={"User-Agent": "ants-2d-doc-parser/1.0"}
@@ -129,7 +127,7 @@ def _extract_links(html: bytes, base_url: str) -> list[str]:
     return urls
 
 
-def _extract_ca_id(tsp_elem: ET.Element) -> Optional[str]:
+def _extract_ca_id(tsp_elem: ET.Element) -> str | None:
     """Récupère 'FRxx' depuis TSPTradeName (ou à défaut dans TSPName)."""
     trade_names = [
         (n.text or "").strip()
@@ -147,8 +145,8 @@ def _extract_ca_id(tsp_elem: ET.Element) -> Optional[str]:
 
 
 def _parse_tsl(
-    source: Union[str, bytes, IO[str]],
-) -> tuple[List[_CertRecord], Dict[str, List[str]]]:
+    source: str | bytes | IO[str],
+) -> tuple[list[_CertRecord], dict[str, list[str]]]:
     tree = (
         ET.parse(source)
         if not isinstance(source, bytes)
@@ -158,8 +156,8 @@ def _parse_tsl(
     if root is None:
         return [], {}
 
-    records: List[_CertRecord] = []
-    tsp_uris: Dict[str, List[str]] = {}
+    records: list[_CertRecord] = []
+    tsp_uris: dict[str, list[str]] = {}
 
     for tsp in root.findall(".//tsl:TrustServiceProvider", NS):
         ca_id = _extract_ca_id(tsp)
@@ -259,8 +257,8 @@ def _derive_cert_ids(cert: x509.Certificate) -> list[str]:
 def _index_cert_for_ca(
     ca_id: str,
     cert: x509.Certificate,
-    target_index: Dict[Tuple[str, str], x509.Certificate],
-    target_bucket: Dict[str, list[x509.Certificate]],
+    target_index: dict[tuple[str, str], x509.Certificate],
+    target_bucket: dict[str, list[x509.Certificate]],
 ) -> None:
     ca = ca_id.upper()
     target_bucket.setdefault(ca, []).append(cert)
@@ -285,10 +283,10 @@ class KeyResolver:
 
     def __init__(
         self,
-        index_exact: Dict[Tuple[str, str], x509.Certificate],
-        per_ca: Dict[str, list[x509.Certificate]],
-        leaf_index: Optional[Dict[Tuple[str, str], x509.Certificate]] = None,
-        per_ca_leaf: Optional[Dict[str, list[x509.Certificate]]] = None,
+        index_exact: dict[tuple[str, str], x509.Certificate],
+        per_ca: dict[str, list[x509.Certificate]],
+        leaf_index: dict[tuple[str, str], x509.Certificate] | None = None,
+        per_ca_leaf: dict[str, list[x509.Certificate]] | None = None,
     ):
         self._index = index_exact  # TSL (souvent AC/intermédiaires)
         self._per_ca = per_ca
@@ -298,11 +296,11 @@ class KeyResolver:
     @classmethod
     def from_tsl(
         cls,
-        source: Union[str, bytes, IO[str]],
+        source: str | bytes | IO[str],
         *,
         fetch_leaves: bool = True,
         timeout: int = 10,
-    ) -> "KeyResolver":
+    ) -> KeyResolver:
         recs, tsp_uris = _parse_tsl(source)
 
         # TSL: trie recent d'abord
@@ -310,8 +308,8 @@ class KeyResolver:
             key=lambda r: (r.ca_id, r.status_start or dt.datetime.min), reverse=True
         )
 
-        index_exact: Dict[Tuple[str, str], x509.Certificate] = {}
-        per_ca: Dict[str, list[x509.Certificate]] = {}
+        index_exact: dict[tuple[str, str], x509.Certificate] = {}
+        per_ca: dict[str, list[x509.Certificate]] = {}
 
         for r in recs:
             # index TSL (AC/intermédiaires)
@@ -320,8 +318,8 @@ class KeyResolver:
                 index_exact[(r.ca_id, cid.upper())] = r.cert
 
         # Feuilles (annuaire de l'AC via TSPInformationURI)
-        leaf_index: Dict[Tuple[str, str], x509.Certificate] = {}
-        per_ca_leaf: Dict[str, list[x509.Certificate]] = {}
+        leaf_index: dict[tuple[str, str], x509.Certificate] = {}
+        per_ca_leaf: dict[str, list[x509.Certificate]] = {}
 
         if fetch_leaves:
             for ca_id, uris in tsp_uris.items():
@@ -378,7 +376,7 @@ class KeyResolver:
             return certs[0].public_key()
 
         # Debug: lister IDs possibles (feuilles + TSL)
-        possibles: Set[str] = set()
+        possibles: set[str] = set()
         for c in leafs:
             possibles.update(_derive_cert_ids(c))
             possibles.update(_ids_from_subject(c))
@@ -394,9 +392,9 @@ class KeyResolver:
         raise KeyError(f"AC inconnu: {ca_id}")
 
     # Helpers optionnels
-    def available_cert_ids(self, ca_id: str) -> Set[str]:
+    def available_cert_ids(self, ca_id: str) -> set[str]:
         """Liste les cert_id candidats connus pour un CA (d’après la TSL)."""
-        out: Set[str] = set()
+        out: set[str] = set()
         for c in self._per_ca.get(ca_id.upper(), []):
             out.update(_derive_cert_ids(c))
         return out

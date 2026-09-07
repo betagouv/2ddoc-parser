@@ -2,10 +2,9 @@
 # Helpers de conversion
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Optional
 
 
-def to_int(s: Optional[str]) -> Optional[int]:
+def to_int(s: str | None) -> int | None:
     if not s:
         return None
     t = s.replace(" ", "").replace("\u00a0", "").replace(".", "").replace(",", "")
@@ -15,7 +14,7 @@ def to_int(s: Optional[str]) -> Optional[int]:
         return None
 
 
-def to_dec(s: Optional[str]) -> Optional[Decimal]:
+def to_dec(s: str | None) -> Decimal | None:
     if not s:
         return None
     try:
@@ -24,7 +23,7 @@ def to_dec(s: Optional[str]) -> Optional[Decimal]:
         return None
 
 
-def to_date_ddmmyyyy(s: Optional[str]) -> Optional[date]:
+def to_date_ddmmyyyy(s: str | None) -> date | None:
     if not s:
         return None
     try:
@@ -33,7 +32,7 @@ def to_date_ddmmyyyy(s: Optional[str]) -> Optional[date]:
         return None
 
 
-def to_date_hex(hex_days: Optional[str]) -> Optional[date]:
+def to_date_hex(hex_days: str | None) -> date | None:
     if not hex_days or hex_days.upper() == "FFFF":
         return None
     try:
@@ -43,7 +42,7 @@ def to_date_hex(hex_days: Optional[str]) -> Optional[date]:
     return date(2000, 1, 1) + timedelta(days=days)
 
 
-def format_name(s: Optional[str]) -> Optional[str]:
+def format_name(s: str | None) -> str | None:
     """Nettoie les slashes (/NOM/PRENOM) pour retourner 'NOM PRENOM'."""
     if not s:
         return s

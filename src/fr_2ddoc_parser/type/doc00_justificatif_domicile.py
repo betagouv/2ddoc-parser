@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Dict, Literal, Optional, cast
+from typing import Literal, cast
+
+from pydantic import BaseModel, Field
 
 from fr_2ddoc_parser.model.models import Decoded2DDoc
 from fr_2ddoc_parser.parser.helper import format_name
 from fr_2ddoc_parser.registry.registry import register
-from pydantic import BaseModel, Field
 
 
 class JustificatifDomicile(BaseModel):
@@ -13,36 +14,36 @@ class JustificatifDomicile(BaseModel):
 
     doc_type: Literal["00"]
 
-    id_document: Optional[str] = (
+    id_document: str | None = (
         None  # 01 (F) - Présent dans certains exemples, mais pas dans la doc. On le rend optionnel.
     )
     # Bénéficiaire
-    ligne1: Optional[str] = None  # 10 (O*)
-    qualite: Optional[str] = None  # 11 (O*)
-    prenom: Optional[str] = None  # 12 (O*)
-    nom: Optional[str] = None  # 13 (O*)
+    ligne1: str | None = None  # 10 (O*)
+    qualite: str | None = None  # 11 (O*)
+    prenom: str | None = None  # 12 (O*)
+    nom: str | None = None  # 13 (O*)
 
     # Co-bénéficiaire
-    co_beneficiaire_present: Optional[str] = None  # 1G (F)
-    co_ligne1: Optional[str] = None  # 1I (F)
-    co_qualite: Optional[str] = None  # 1J (F)
-    co_prenom: Optional[str] = None  # 1K (F)
-    co_nom: Optional[str] = None  # 1L (F)
+    co_beneficiaire_present: str | None = None  # 1G (F)
+    co_ligne1: str | None = None  # 1I (F)
+    co_qualite: str | None = None  # 1J (F)
+    co_prenom: str | None = None  # 1K (F)
+    co_nom: str | None = None  # 1L (F)
 
     # Adresse
-    ligne2: Optional[str] = None  # 20 (O)
-    ligne3: Optional[str] = None  # 21 (O)
-    voie: Optional[str] = None  # 22 (O)
-    ligne5: Optional[str] = None  # 23 (O)
-    code_postal: Optional[str] = None  # 24 (O)
-    localite: Optional[str] = None  # 25 (O)
-    pays: Optional[str] = None  # 26 (O)
+    ligne2: str | None = None  # 20 (O)
+    ligne3: str | None = None  # 21 (O)
+    voie: str | None = None  # 22 (O)
+    ligne5: str | None = None  # 23 (O)
+    code_postal: str | None = None  # 24 (O)
+    localite: str | None = None  # 25 (O)
+    pays: str | None = None  # 26 (O)
 
     # Champs supplémentaires non cartographiés
-    extras: Dict[str, str] = Field(default_factory=dict)
+    extras: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
-    def from_decoded(cls, d: Decoded2DDoc) -> "JustificatifDomicile":
+    def from_decoded(cls, d: Decoded2DDoc) -> JustificatifDomicile:
         f = d.fields
         known = {
             "01",
