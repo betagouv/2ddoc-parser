@@ -8,7 +8,7 @@ Bibliothèque Python pour décoder et vérifier les **2D-DOC** de l'ANTS (Agence
 Les 2D-DOC sont des codes-barres 2D (DataMatrix) présents sur de nombreux documents administratifs français (avis d'impôts, permis de conduire, cartes grises, etc.). Cette bibliothèque permet de :
 - **Parser** la structure DC04 du 2D-DOC
 - **Décoder** les champs métier selon le type de document
-- **Vérifier** la signature cryptographique (ECDSA) avec la TSL ANTS
+- **Vérifier** la signature cryptographique (ECDSA / RSA) avec la TSL ANTS
 
 ## 🚀 Installation
 

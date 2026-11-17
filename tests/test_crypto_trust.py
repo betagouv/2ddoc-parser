@@ -18,9 +18,14 @@ from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.x509.oid import NameOID
 
 from fr_2ddoc_parser.api import decode_2d_doc
+from fr_2ddoc_parser.crypto import sync_trust_store as sync_mod
 from fr_2ddoc_parser.crypto.key_resolver import (
+    _MAX_FETCH_BYTES,
     ENV_TRUST_STORE_DIR,
     KeyResolver,
+    _extract_links,
+    _fetch_bytes,
+    _parse_tsl_bytes,
     get_default_key_resolver,
     reset_default_key_resolver,
 )
@@ -212,6 +217,7 @@ def _build_signed_tsl_xml(
     issue_dt: dt.datetime,
     next_update_dt: dt.datetime,
     signing_dt: dt.datetime | None = None,
+    tsp_uris: dict[str, str] | None = None,
 ) -> bytes:
     tsp_blocks: list[str] = []
     for ca_id, ca_cert, status_start in ca_entries:
@@ -222,6 +228,7 @@ def _build_signed_tsl_xml(
                 <tsl:TSPInformation>
                     <tsl:TSPName><tsl:Name xml:lang="fr">Test CA {ca_id}</tsl:Name></tsl:TSPName>
                     <tsl:TSPTradeName><tsl:Name xml:lang="fr">{ca_id}</tsl:Name></tsl:TSPTradeName>
+                    {f'<tsl:TSPInformationURI><tsl:URI xml:lang="fr">{tsp_uris[ca_id]}</tsl:URI></tsl:TSPInformationURI>' if tsp_uris and ca_id in tsp_uris else ""}
                 </tsl:TSPInformation>
                 <tsl:TSPServices>
                     <tsl:TSPService>
@@ -992,3 +999,187 @@ def test_embedded_snapshot_loads_offline_and_enforces_revocations(monkeypatch):
             test_0000_cert, resolver._crls_by_ca["FR03"], dt.date(2016, 1, 1)
         )
     assert "révoqué" in str(exc_info_2.value)
+
+
+def test_tsl_xsw_unsigned_object_rejected(synthetic_pki):
+    """SEC-01 : injection XML Signature Wrapping dans <ds:Object> / <ds:KeyInfo> rejetée."""
+    evil_ca_key = _make_ec_key()
+    evil_ca_cert = _build_ca_cert(
+        "FR99",
+        evil_ca_key,
+        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+        not_after=dt.datetime(2032, 1, 1, tzinfo=dt.timezone.utc),
+    )
+    evil_b64 = base64.b64encode(evil_ca_cert.public_bytes(Encoding.DER)).decode("ascii")
+    injected_tsp = (
+        "<ds:Object>"
+        '<tsl:TrustServiceProvider xmlns:tsl="http://uri.etsi.org/02231/v2#">'
+        "<tsl:TSPInformation>"
+        '<tsl:TSPName><tsl:Name xml:lang="fr">Evil CA</tsl:Name></tsl:TSPName>'
+        '<tsl:TSPTradeName><tsl:Name xml:lang="fr">FR99</tsl:Name></tsl:TSPTradeName>'
+        "</tsl:TSPInformation>"
+        "<tsl:TSPServices><tsl:TSPService><tsl:ServiceInformation>"
+        "<tsl:ServiceTypeIdentifier>http://uri.etsi.org/TrstSvc/Svctype/CA/PKC</tsl:ServiceTypeIdentifier>"
+        "<tsl:ServiceDigitalIdentity><tsl:DigitalId>"
+        f"<tsl:X509Certificate>{evil_b64}</tsl:X509Certificate>"
+        "</tsl:DigitalId></tsl:ServiceDigitalIdentity>"
+        "<tsl:ServiceStatus>http://uri.etsi.org/TrstSvc/Svcstatus/inaccord</tsl:ServiceStatus>"
+        "<tsl:StatusStartingTime>2020-01-01T00:00:00Z</tsl:StatusStartingTime>"
+        "</tsl:ServiceInformation></tsl:TSPService></tsl:TSPServices>"
+        "</tsl:TrustServiceProvider>"
+        "</ds:Object>"
+    ).encode("utf-8")
+
+    evil_tsl = synthetic_pki["tsl_bytes"].replace(
+        b"</ds:Signature>", injected_tsp + b"</ds:Signature>"
+    )
+
+    with pytest.raises(TrustSignatureError):
+        KeyResolver.from_tsl(
+            evil_tsl,
+            root_ca_cert=synthetic_pki["ants_root_cert"],
+            verify_tsl_signature=True,
+        )
+
+    # Même en appelant _parse_tsl_bytes directement, FR99 n'est jamais extraite
+    recs, _, _ = _parse_tsl_bytes(evil_tsl)
+    assert all(r.ca_id != "FR99" for r in recs)
+
+
+def test_fetch_bytes_rejects_non_http_schemes_and_oversized_payloads(monkeypatch):
+    """SEC-02 : validation des schémas URL, restriction du fallback HTTP et borne 10 Mo."""
+    html = (
+        b'<a href="file:///etc/passwd.pem">bad1</a>'
+        b'<a href="ftp://evil.example/a.cer">bad2</a>'
+        b'<a href="javascript:alert(1).der">bad3</a>'
+        b'<a href="https://good.example/cert.der">ok1</a>'
+        b'<a href="sub/leaf.pem">ok2</a>'
+    )
+    links = _extract_links(html, "https://good.example/dir/index.html")
+    assert links == [
+        "https://good.example/cert.der",
+        "https://good.example/dir/sub/leaf.pem",
+    ]
+
+    called_urls: list[str] = []
+
+    class _FakeResp:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self, n: int = -1) -> bytes:
+            return self._payload if n < 0 else self._payload[:n]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def _fake_urlopen(req, timeout=10):
+        called_urls.append(req.full_url)
+        if req.full_url.startswith("https://sp.ants.gouv.fr/"):
+            raise OSError("TLS internal CA")
+        if req.full_url.startswith("https://evil-ants.gouv.fr/"):
+            raise OSError("TLS error")
+        if "oversized" in req.full_url:
+            return _FakeResp(b"x" * (_MAX_FETCH_BYTES + 5))
+        return _FakeResp(b"ok")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    # Rejet file:// et ftp:// sans aucun appel urlopen
+    assert _fetch_bytes("file:///etc/passwd") is None
+    assert _fetch_bytes("ftp://example.com/file.der") is None
+    assert called_urls == []
+
+    # Fallback HTTP autorisé uniquement pour sp.ants.gouv.fr exact
+    assert _fetch_bytes("https://sp.ants.gouv.fr/cev/FR09_cert.der") == b"ok"
+    assert called_urls == [
+        "https://sp.ants.gouv.fr/cev/FR09_cert.der",
+        "http://sp.ants.gouv.fr/cev/FR09_cert.der",
+    ]
+
+    called_urls.clear()
+    assert _fetch_bytes("https://evil-ants.gouv.fr/cert.der") is None
+    assert called_urls == ["https://evil-ants.gouv.fr/cert.der"]
+
+    # Rejet payload dépassant _MAX_FETCH_BYTES
+    assert _fetch_bytes("https://good.example/oversized.der") is None
+
+
+def test_sync_trust_store_atomic_fail_closed(
+    monkeypatch, tmp_path: Path, synthetic_pki
+):
+    """AC-10 : sync_trust_store met à jour atomiquement et n'écrase pas en cas d'échec."""
+    anchor_pem = synthetic_pki["ants_root_cert"].public_bytes(Encoding.PEM)
+    (tmp_path / "ants_tsl_root_ca.pem").write_bytes(anchor_pem)
+
+    ca_cert = synthetic_pki["ca_cert"]
+    leaf_der = synthetic_pki["leaf_cert"].public_bytes(Encoding.DER)
+    crl_der = synthetic_pki["crl"].public_bytes(Encoding.DER)
+
+    tsl_v42 = _build_signed_tsl_xml(
+        ca_entries=[("FR06", ca_cert, dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc))],
+        signer_cert=synthetic_pki["tsl_signer_cert"],
+        signer_key=synthetic_pki["tsl_signer_key"],
+        sequence_number=42,
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+    )
+    tsl_v43 = _build_signed_tsl_xml(
+        ca_entries=[("FR06", ca_cert, dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc))],
+        signer_cert=synthetic_pki["tsl_signer_cert"],
+        signer_key=synthetic_pki["tsl_signer_key"],
+        sequence_number=43,
+        issue_dt=dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc),
+        next_update_dt=dt.datetime(2027, 6, 1, tzinfo=dt.timezone.utc),
+        tsp_uris={"FR06": "https://ca.example/fr06.der"},
+    )
+
+    # Initialise un magasin v42 existant
+    (tmp_path / "tsl_signed.xml").write_bytes(tsl_v42)
+    (tmp_path / "trusted_leaves").mkdir()
+    (tmp_path / "trusted_leaves" / "FR06.pem").write_bytes(
+        synthetic_pki["leaf_cert"].public_bytes(Encoding.PEM)
+    )
+    (tmp_path / "crls").mkdir()
+    (tmp_path / "crls" / "FR06.crl").write_bytes(crl_der)
+
+    def _mock_fetch_ok(url: str, timeout: int = 15) -> bytes | None:
+        if url == "https://tsl.example/tsl.xml":
+            return tsl_v43
+        if url == "https://ca.example/fr06.der":
+            return leaf_der
+        if url == "https://ca.example/fr06.crl":
+            return crl_der
+        return None
+
+    monkeypatch.setattr(sync_mod, "_fetch_bytes", _mock_fetch_ok)
+    monkeypatch.setattr(
+        sync_mod,
+        "extract_crl_urls_from_certs",
+        lambda certs: ["https://ca.example/fr06.crl"],
+    )
+
+    # 1) Synchronisation nominale vers v43
+    synced = sync_mod.sync_trust_store(
+        output_dir=tmp_path, tsl_url="https://tsl.example/tsl.xml"
+    )
+    assert synced.tsl_sequence_number == 43
+    assert synced.available_cert_ids("FR06") == {"FPE2"}
+
+    # 2) Échec (TSL altérée) -> fail-closed, le magasin v43 existant reste intact
+    tampered_v44 = tsl_v43.replace(b">43<", b">44<")
+    monkeypatch.setattr(
+        sync_mod,
+        "_fetch_bytes",
+        lambda url, timeout=15: tampered_v44 if "tsl.xml" in url else None,
+    )
+    with pytest.raises(TrustSignatureError):
+        sync_mod.sync_trust_store(
+            output_dir=tmp_path, tsl_url="https://tsl.example/tsl.xml"
+        )
+
+    reloaded = KeyResolver.from_trust_store(tmp_path)
+    assert reloaded.tsl_sequence_number == 43

@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 
 ENV_TRUST_STORE_DIR = "FR_2DDOC_TRUST_STORE_DIR"
 DEFAULT_TSL_URL = "https://pub.ants.gouv.fr/2D-DOC/V1/PRD/01_TSL/tsl_signed.xml"
+_MAX_FETCH_BYTES = 10 * 1024 * 1024  # 10 MiB
+_CA_ID_RE = re.compile(r"^FR\d{2}$")
 
 # Namespace map (TSL ETSI)
 NS = {
@@ -112,11 +114,23 @@ def _parse_any_certs(data: bytes) -> list[x509.Certificate]:
     return _scan_der_certs(data)
 
 
+def _is_safe_http_url(url: str) -> urllib.parse.ParseResult | None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() in ("http", "https") and bool(parsed.hostname):
+        return parsed
+    return None
+
+
 def _fetch_bytes(url: str, timeout: int = 10) -> bytes | None:
     """Télécharge une ressource HTTP/HTTPS avec fallback HTTP pour sp.ants.gouv.fr."""
+    parsed = _is_safe_http_url(url)
+    if parsed is None:
+        logger.warning("URL rejetée (schéma ou hôte non autorisé): %s", url)
+        return None
+
     candidates = [url]
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme == "https" and parsed.netloc.endswith("ants.gouv.fr"):
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme.lower() == "https" and host == "sp.ants.gouv.fr":
         candidates.append(urllib.parse.urlunparse(parsed._replace(scheme="http")))
 
     for candidate in candidates:
@@ -125,18 +139,28 @@ def _fetch_bytes(url: str, timeout: int = 10) -> bytes | None:
                 candidate, headers={"User-Agent": "ants-2d-doc-parser/1.0"}
             )
             with urllib.request.urlopen(req, timeout=timeout) as response:
-                return response.read()
+                data = response.read(_MAX_FETCH_BYTES + 1)
+                if len(data) > _MAX_FETCH_BYTES:
+                    logger.warning(
+                        "Réponse HTTP trop volumineuse (> %d octets) ignorée pour %s",
+                        _MAX_FETCH_BYTES,
+                        candidate,
+                    )
+                    return None
+                return data
         except Exception as exc:
             logger.debug("Échec téléchargement %s: %s", candidate, exc)
     return None
 
 
 def _extract_links(html: bytes, base_url: str) -> list[str]:
-    """Récupère les liens .cer/.crt/.der/.pem depuis une page HTML."""
+    """Récupère les liens HTTP/HTTPS .cer/.crt/.der/.pem depuis une page HTML."""
     urls: list[str] = []
     for m in HREF_RE.finditer(html):
         href = unescape(m.group(1).decode("utf-8", "ignore"))
         href = urllib.parse.urljoin(base_url, href)
+        if _is_safe_http_url(href) is None:
+            continue
         if re.search(r"\.(cer|crt|der|pem)(\?.*)?$", href, re.IGNORECASE):
             urls.append(href)
     return urls
@@ -146,12 +170,12 @@ def _extract_ca_id(tsp_elem: ET.Element) -> str | None:
     """Récupère 'FRxx' depuis TSPTradeName (ou à défaut dans TSPName)."""
     trade_names = [
         (n.text or "").strip()
-        for n in tsp_elem.findall(".//tsl:TSPTradeName/tsl:Name", NS)
+        for n in tsp_elem.findall("./tsl:TSPInformation/tsl:TSPTradeName/tsl:Name", NS)
     ]
     for tn in trade_names:
-        if re.fullmatch(r"FR\d{2}", tn):
+        if _CA_ID_RE.fullmatch(tn):
             return tn
-    for n in tsp_elem.findall(".//tsl:TSPName/tsl:Name", NS):
+    for n in tsp_elem.findall("./tsl:TSPInformation/tsl:TSPName/tsl:Name", NS):
         m = re.search(r"(FR\d{2})", (n.text or ""))
         if m:
             return m.group(1)
@@ -186,6 +210,8 @@ def _parse_iso_dt(raw: str | None) -> dt.datetime | None:
 
 def _parse_tsl_bytes(
     xml_bytes: bytes,
+    *,
+    include_test_ca: bool = False,
 ) -> tuple[list[_CertRecord], dict[str, list[str]], TslMetadata]:
     if not xml_bytes or _FORBIDDEN_XML_DECL_RE.search(xml_bytes):
         raise TrustSignatureError(
@@ -197,16 +223,36 @@ def _parse_tsl_bytes(
     except ET.ParseError as exc:
         raise ResolverUnavailableError(f"XML TSL invalide: {exc}") from exc
 
-    seq_txt = root.findtext(".//tsl:TSLSequenceNumber", default="", namespaces=NS)
+    expected_root_tag = f"{{{NS['tsl']}}}TrustServiceStatusList"
+    if root.tag != expected_root_tag:
+        raise TrustSignatureError(
+            f"Racine XML TSL inattendue: {root.tag!r} ({expected_root_tag!r} attendu)."
+        )
+
+    # Retirer tout bloc ds:Signature avant extraction structurelle (anti-XSW)
+    sig_tag = f"{{{NS['ds']}}}Signature"
+    for child in list(root):
+        if child.tag == sig_tag:
+            root.remove(child)
+
+    seq_txt = root.findtext(
+        "./tsl:SchemeInformation/tsl:TSLSequenceNumber", default="", namespaces=NS
+    )
     seq_num: int | None = None
     if seq_txt.strip().isdigit():
         seq_num = int(seq_txt.strip())
 
     issue_dt = _parse_iso_dt(
-        root.findtext(".//tsl:ListIssueDateTime", default="", namespaces=NS)
+        root.findtext(
+            "./tsl:SchemeInformation/tsl:ListIssueDateTime", default="", namespaces=NS
+        )
     )
     next_upd = _parse_iso_dt(
-        root.findtext(".//tsl:NextUpdate/tsl:dateTime", default="", namespaces=NS)
+        root.findtext(
+            "./tsl:SchemeInformation/tsl:NextUpdate/tsl:dateTime",
+            default="",
+            namespaces=NS,
+        )
     )
     metadata = TslMetadata(
         sequence_number=seq_num,
@@ -218,34 +264,46 @@ def _parse_tsl_bytes(
     records: list[_CertRecord] = []
     tsp_uris: dict[str, list[str]] = {}
 
-    for tsp in root.findall(".//tsl:TrustServiceProvider", NS):
+    for tsp in root.findall(
+        "./tsl:TrustServiceProviderList/tsl:TrustServiceProvider", NS
+    ):
         ca_id = _extract_ca_id(tsp)
         if not ca_id:
             continue
+        ca_id = ca_id.upper()
+        if not include_test_ca and ca_id == "FR00":
+            continue
 
         uris: list[str] = []
-        for u in tsp.findall(".//tsl:TSPInformationURI/tsl:URI", NS):
-            if u.text:
-                uris.append(u.text.strip())
-        for u in tsp.findall(".//tsl:TSPInformation/tsl:TSPInformationURI/tsl:URI", NS):
+        for u in tsp.findall("./tsl:TSPInformation/tsl:TSPInformationURI/tsl:URI", NS):
             if u.text:
                 uris.append(u.text.strip())
         if uris:
             tsp_uris[ca_id] = list(dict.fromkeys(uris))
 
-        for svc in tsp.findall(".//tsl:TSPService", NS):
+        for svc in tsp.findall("./tsl:TSPServices/tsl:TSPService", NS):
             svc_status = (
-                svc.findtext(".//tsl:ServiceStatus", default="", namespaces=NS) or ""
+                svc.findtext(
+                    "./tsl:ServiceInformation/tsl:ServiceStatus",
+                    default="",
+                    namespaces=NS,
+                )
+                or ""
             ).strip()
             if svc_status != SVCSTATUS_INACCORD:
                 continue
 
             status_start = _parse_iso_dt(
-                svc.findtext(".//tsl:StatusStartingTime", default="", namespaces=NS)
+                svc.findtext(
+                    "./tsl:ServiceInformation/tsl:StatusStartingTime",
+                    default="",
+                    namespaces=NS,
+                )
             )
 
             for cert_b64_elem in svc.findall(
-                ".//tsl:ServiceDigitalIdentity//tsl:X509Certificate", NS
+                "./tsl:ServiceInformation/tsl:ServiceDigitalIdentity/tsl:DigitalId/tsl:X509Certificate",
+                NS,
             ):
                 b64 = (cert_b64_elem.text or "").strip()
                 if not b64:
@@ -253,11 +311,14 @@ def _parse_tsl_bytes(
                 try:
                     der = base64.b64decode(b64, validate=True)
                     cert = x509.load_der_x509_certificate(der)
-                except Exception:
+                except Exception as exc:
+                    logger.debug(
+                        "Certificat X.509 TSL invalide ignoré pour %s: %s", ca_id, exc
+                    )
                     continue
                 records.append(
                     _CertRecord(
-                        ca_id=ca_id.upper(),
+                        ca_id=ca_id,
                         pem_der=der,
                         cert=cert,
                         status_start=status_start,
@@ -410,6 +471,17 @@ class KeyResolver:
         """Valide puis indexe un certificat feuille pour une AC présente dans la TSL."""
         ca = ca_id.upper()
         _, cert_id = self._match_ca_for_leaf(ca, leaf_cert)
+        existing = self._leaf_index.get((ca, cert_id))
+        if existing is not None and existing.serial_number != leaf_cert.serial_number:
+            logger.warning(
+                "Collision d'indexation sur (%s, %s): certificat série %s vs %s",
+                ca,
+                cert_id,
+                existing.serial_number,
+                leaf_cert.serial_number,
+            )
+            if existing.not_valid_after_utc > leaf_cert.not_valid_after_utc:
+                return cert_id
         self._leaf_index[(ca, cert_id)] = leaf_cert
         return cert_id
 
@@ -443,6 +515,7 @@ class KeyResolver:
         timeout: int = 10,
         root_ca_cert: x509.Certificate | None = None,
         verify_tsl_signature: bool = True,
+        include_test_ca: bool = False,
         leaf_certs_by_ca: Mapping[str, Sequence[x509.Certificate]] | None = None,
         crls_by_ca: Mapping[str, Sequence[x509.CertificateRevocationList]]
         | None = None,
@@ -459,7 +532,9 @@ class KeyResolver:
             anchor = root_ca_cert or _load_packaged_root_ca()
             verified_meta = verify_tsl_xml_signature(xml_bytes, anchor)
 
-        recs, tsp_uris, parsed_meta = _parse_tsl_bytes(xml_bytes)
+        recs, tsp_uris, parsed_meta = _parse_tsl_bytes(
+            xml_bytes, include_test_ca=include_test_ca
+        )
         meta = verified_meta or parsed_meta
 
         recs.sort(
@@ -566,11 +641,21 @@ class KeyResolver:
 
         if has_leaves_dir and leaves_dir is not None:
             pem_files = sorted(
-                (item for item in leaves_dir.iterdir() if item.name.endswith(".pem")),
+                (
+                    item
+                    for item in leaves_dir.iterdir()
+                    if item.is_file() and item.name.endswith(".pem")
+                ),
                 key=lambda p: p.name,
             )
             for pem_item in pem_files:
                 ca_id = pem_item.name[:-4].upper()
+                if not _CA_ID_RE.fullmatch(ca_id):
+                    logger.warning(
+                        "Fichier de feuilles ignoré (nom ca_id invalide): %s",
+                        pem_item.name,
+                    )
+                    continue
                 try:
                     pem_bytes = pem_item.read_bytes()
                 except Exception as exc:
@@ -627,11 +712,21 @@ class KeyResolver:
 
         if has_crls_dir and crls_dir is not None:
             crl_files = sorted(
-                (item for item in crls_dir.iterdir() if item.name.endswith(".crl")),
+                (
+                    item
+                    for item in crls_dir.iterdir()
+                    if item.is_file() and item.name.endswith(".crl")
+                ),
                 key=lambda p: p.name,
             )
             for crl_item in crl_files:
                 ca_id = crl_item.name[:-4].upper()
+                if not _CA_ID_RE.fullmatch(ca_id):
+                    logger.warning(
+                        "Fichier CRL ignoré (nom ca_id invalide): %s",
+                        crl_item.name,
+                    )
+                    continue
                 try:
                     crl_bytes = crl_item.read_bytes()
                     crl = _load_crl_bytes(crl_bytes)
@@ -687,9 +782,12 @@ class KeyResolver:
         return resolver
 
     def resolve(self, ca_id: str, cert_id: str) -> CertificatePublicKeyTypes:
-        """Retourne la clé publique validée pour ``(ca_id, cert_id)``.
+        """Retourne la clé publique validée (chaîne X.509 AC -> feuille) pour ``(ca_id, cert_id)``.
 
         Aucun fallback sur certificat unique n'est effectué.
+        Attention : cette méthode bas niveau ne contrôle ni la révocation (CRL)
+        ni les dates de validité ni la fraîcheur de la TSL. Pour une vérification
+        complète d'un 2D-Doc, utiliser ``resolve_for_verification()`` ou ``Decoded2DDoc.verify()``.
         """
         ca = ca_id.upper()
         cid = (cert_id or "").upper()

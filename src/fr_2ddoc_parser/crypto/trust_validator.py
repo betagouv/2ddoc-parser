@@ -257,6 +257,20 @@ def _canonicalize_subtree_exc(node: minidom.Element) -> bytes:
     return canonical.encode("utf-8")
 
 
+def _direct_children_ns(
+    parent: minidom.Element, namespace: str, local_name: str
+) -> list[minidom.Element]:
+    out: list[minidom.Element] = []
+    for child in parent.childNodes:
+        if (
+            isinstance(child, minidom.Element)
+            and child.namespaceURI == namespace
+            and child.localName == local_name
+        ):
+            out.append(child)
+    return out
+
+
 def _find_unique_element_by_id(
     root: minidom.Element, target_id: str
 ) -> minidom.Element:
@@ -307,8 +321,14 @@ def verify_tsl_xml_signature(
         raise TrustSignatureError(f"XML TSL mal formé: {exc}") from exc
 
     root = dom.documentElement
-    if root is None:
-        raise TrustSignatureError("Racine XML TSL absente.")
+    if (
+        root is None
+        or root.namespaceURI != TSL_NS
+        or root.localName != "TrustServiceStatusList"
+    ):
+        raise TrustSignatureError(
+            "Racine XML TSL invalide (tsl:TrustServiceStatusList attendu)."
+        )
 
     sigs = root.getElementsByTagNameNS(DS_NS, "Signature")
     if len(sigs) != 1 or sigs[0].parentNode is not root:
@@ -317,11 +337,28 @@ def verify_tsl_xml_signature(
         )
     sig_el = sigs[0]
 
-    signed_info_list = sig_el.getElementsByTagNameNS(DS_NS, "SignedInfo")
-    sig_val_list = sig_el.getElementsByTagNameNS(DS_NS, "SignatureValue")
-    cert_els = sig_el.getElementsByTagNameNS(DS_NS, "X509Certificate")
-    if len(signed_info_list) != 1 or len(sig_val_list) != 1 or not cert_els:
+    # Aucun élément du namespace TSL n'est autorisé à l'intérieur de ds:Signature (anti-XSW)
+    if sig_el.getElementsByTagNameNS(TSL_NS, "*"):
+        raise TrustSignatureError(
+            "Élément TSL inattendu à l'intérieur de ds:Signature (XSW rejeté)."
+        )
+
+    signed_info_list = _direct_children_ns(sig_el, DS_NS, "SignedInfo")
+    sig_val_list = _direct_children_ns(sig_el, DS_NS, "SignatureValue")
+    key_info_list = _direct_children_ns(sig_el, DS_NS, "KeyInfo")
+    if len(signed_info_list) != 1 or len(sig_val_list) != 1 or len(key_info_list) != 1:
         raise TrustSignatureError("Structure ds:Signature incomplète dans la TSL.")
+
+    x509_data_list = _direct_children_ns(key_info_list[0], DS_NS, "X509Data")
+    cert_els = (
+        _direct_children_ns(x509_data_list[0], DS_NS, "X509Certificate")
+        if x509_data_list
+        else []
+    )
+    if not cert_els:
+        raise TrustSignatureError(
+            "Certificat signataire X509Certificate absent de ds:KeyInfo."
+        )
 
     signed_info_el = signed_info_list[0]
     sig_val_b64 = _element_text(sig_val_list[0])
@@ -355,16 +392,19 @@ def verify_tsl_xml_signature(
             "Le certificat signataire TSL n'autorise pas digitalSignature."
         )
 
-    # Algorithmes autorisés
-    c14n_els = signed_info_el.getElementsByTagNameNS(DS_NS, "CanonicalizationMethod")
-    if c14n_els:
-        c14n_alg = c14n_els[0].getAttribute("Algorithm")
-        if c14n_alg not in _ALLOWED_C14N_ALGS:
-            raise TrustSignatureError(
-                f"Algorithme de canonicalisation TSL non supporté: {c14n_alg!r}"
-            )
+    # Algorithmes autorisés (enfants directs de ds:SignedInfo)
+    c14n_els = _direct_children_ns(signed_info_el, DS_NS, "CanonicalizationMethod")
+    if len(c14n_els) != 1:
+        raise TrustSignatureError(
+            "ds:CanonicalizationMethod manquant ou multiple dans ds:SignedInfo."
+        )
+    c14n_alg = c14n_els[0].getAttribute("Algorithm")
+    if c14n_alg not in _ALLOWED_C14N_ALGS:
+        raise TrustSignatureError(
+            f"Algorithme de canonicalisation TSL non supporté: {c14n_alg!r}"
+        )
 
-    sig_method_els = signed_info_el.getElementsByTagNameNS(DS_NS, "SignatureMethod")
+    sig_method_els = _direct_children_ns(signed_info_el, DS_NS, "SignatureMethod")
     if len(sig_method_els) != 1:
         raise TrustSignatureError("ds:SignatureMethod manquant dans ds:SignedInfo.")
     sig_alg = sig_method_els[0].getAttribute("Algorithm")
@@ -374,16 +414,17 @@ def verify_tsl_xml_signature(
             f"Algorithme de signature TSL non autorisé: {sig_alg!r}"
         )
 
-    # Vérification de toutes les références
-    ref_els = signed_info_el.getElementsByTagNameNS(DS_NS, "Reference")
+    # Vérification de toutes les références (enfants directs de ds:SignedInfo)
+    ref_els = _direct_children_ns(signed_info_el, DS_NS, "Reference")
     if not ref_els:
         raise TrustSignatureError("Aucune référence ds:Reference dans ds:SignedInfo.")
 
     has_doc_ref = False
+    verified_signed_props: list[minidom.Element] = []
     for ref_el in ref_els:
         uri = ref_el.getAttribute("URI")
-        digest_method_els = ref_el.getElementsByTagNameNS(DS_NS, "DigestMethod")
-        digest_val_els = ref_el.getElementsByTagNameNS(DS_NS, "DigestValue")
+        digest_method_els = _direct_children_ns(ref_el, DS_NS, "DigestMethod")
+        digest_val_els = _direct_children_ns(ref_el, DS_NS, "DigestValue")
         if len(digest_method_els) != 1 or len(digest_val_els) != 1:
             raise TrustSignatureError("ds:Reference mal formée dans ds:SignedInfo.")
 
@@ -401,6 +442,7 @@ def verify_tsl_xml_signature(
         except Exception as exc:
             raise TrustSignatureError(f"DigestValue base64 invalide: {exc}") from exc
 
+        target_el: minidom.Element | None = None
         if uri == "":
             has_doc_ref = True
             doc_clone = dom.cloneNode(deep=True)
@@ -428,6 +470,12 @@ def verify_tsl_xml_signature(
             raise TrustSignatureError(
                 f"Condensat XML-DSig invalide pour la référence {uri!r}."
             )
+        if (
+            target_el is not None
+            and target_el.namespaceURI == XADES_NS
+            and target_el.localName == "SignedProperties"
+        ):
+            verified_signed_props.append(target_el)
 
     if not has_doc_ref:
         raise TrustSignatureError(
@@ -451,8 +499,15 @@ def verify_tsl_xml_signature(
             "Signature cryptographique XML-DSig de la TSL invalide."
         ) from exc
 
-    # Extraction des métadonnées TSL
-    seq_els = root.getElementsByTagNameNS(TSL_NS, "TSLSequenceNumber")
+    # Extraction des métadonnées TSL uniquement depuis SchemeInformation (enfant direct de root)
+    scheme_info_els = _direct_children_ns(root, TSL_NS, "SchemeInformation")
+    if len(scheme_info_els) != 1:
+        raise TrustSignatureError(
+            "Élément tsl:SchemeInformation manquant ou multiple à la racine de la TSL."
+        )
+    scheme_info = scheme_info_els[0]
+
+    seq_els = _direct_children_ns(scheme_info, TSL_NS, "TSLSequenceNumber")
     seq_num: int | None = None
     if seq_els:
         try:
@@ -460,22 +515,27 @@ def verify_tsl_xml_signature(
         except ValueError:
             seq_num = None
 
-    issue_els = root.getElementsByTagNameNS(TSL_NS, "ListIssueDateTime")
+    issue_els = _direct_children_ns(scheme_info, TSL_NS, "ListIssueDateTime")
     issue_date = _parse_iso_datetime(_element_text(issue_els[0])) if issue_els else None
 
     next_update: datetime | None = None
-    next_els = root.getElementsByTagNameNS(TSL_NS, "NextUpdate")
+    next_els = _direct_children_ns(scheme_info, TSL_NS, "NextUpdate")
     if next_els:
-        dt_els = next_els[0].getElementsByTagNameNS(TSL_NS, "dateTime")
+        dt_els = _direct_children_ns(next_els[0], TSL_NS, "dateTime")
         if dt_els:
             next_update = _parse_iso_datetime(_element_text(dt_els[0]))
 
-    signing_time_els = sig_el.getElementsByTagNameNS(XADES_NS, "SigningTime")
-    signing_time = (
-        _parse_iso_datetime(_element_text(signing_time_els[0]))
-        if signing_time_els
-        else None
-    )
+    # SigningTime lu exclusivement depuis un <xades:SignedProperties> couvert par ds:Reference
+    signing_time: datetime | None = None
+    for sp_el in verified_signed_props:
+        ssp_els = _direct_children_ns(sp_el, XADES_NS, "SignedSignatureProperties")
+        if not ssp_els:
+            continue
+        st_els = _direct_children_ns(ssp_els[0], XADES_NS, "SigningTime")
+        if st_els:
+            signing_time = _parse_iso_datetime(_element_text(st_els[0]))
+            if signing_time is not None:
+                break
 
     if check_signer_validity:
         ref_dt = signing_time or issue_date
