@@ -222,8 +222,9 @@ def _build_leaf_cert(
 
 
 def _independent_c14n(xml: str, *, exclusive: bool) -> bytes:
+    root = LET.fromstring(xml.encode("utf-8"))
     return LET.tostring(
-        LET.fromstring(xml.encode("utf-8")),
+        root.getroottree(),
         method="c14n",
         exclusive=exclusive,
         with_comments=False,
@@ -244,6 +245,7 @@ def _build_signed_tsl_xml(
     signed_properties_c14n: str | None = "http://www.w3.org/2001/10/xml-exc-c14n#",
     signed_info_c14n: str = "http://www.w3.org/2001/10/xml-exc-c14n#",
     root_attributes: str = "",
+    document_suffix: str = "",
 ) -> bytes:
     tsp_blocks: list[str] = []
     for ca_id, ca_cert, status_start in ca_entries:
@@ -293,7 +295,7 @@ def _build_signed_tsl_xml(
     )
 
     c14n_doc = _independent_c14n(
-        unsigned_xml,
+        unsigned_xml + document_suffix,
         exclusive=reference_c14n == "http://www.w3.org/2001/10/xml-exc-c14n#",
     )
     doc_digest = base64.b64encode(hashlib.sha256(c14n_doc).digest()).decode("ascii")
@@ -396,7 +398,7 @@ def _build_signed_tsl_xml(
         "</tsl:TrustServiceStatusList>",
         sig_block + "</tsl:TrustServiceStatusList>",
     )
-    return signed_xml.encode("utf-8")
+    return (signed_xml + document_suffix).encode("utf-8")
 
 
 def _build_crl(
@@ -408,6 +410,7 @@ def _build_crl(
     revoked_entries: list[tuple[int, dt.datetime, x509.ReasonFlags | None]]
     | None = None,
     extra_extensions: list[x509.Extension] | None = None,
+    revoked_entry_extensions: list[x509.Extension] | None = None,
 ) -> x509.CertificateRevocationList:
     builder = (
         x509.CertificateRevocationListBuilder()
@@ -424,6 +427,10 @@ def _build_crl(
         if reason is not None:
             rev_builder = rev_builder.add_extension(
                 x509.CRLReason(reason), critical=False
+            )
+        for extension in revoked_entry_extensions or []:
+            rev_builder = rev_builder.add_extension(
+                extension.value, critical=extension.critical
             )
         builder = builder.add_revoked_certificate(rev_builder.build())
     for extension in extra_extensions or []:
@@ -2019,6 +2026,72 @@ def test_from_network_fails_closed_when_crl_download_fails(monkeypatch, syntheti
     assert decoded.is_valid is True
     assert decoded.verification is not None
     assert decoded.verification.status == VerificationStatus.VERIFIED
+
+
+def test_unknown_critical_crl_entry_extension_rejects_entire_crl(synthetic_pki):
+    unsupported = x509.UnrecognizedExtension(
+        x509.ObjectIdentifier("1.2.3.4"), b"\x05\x00"
+    )
+    crl = _build_crl(
+        synthetic_pki["ca_cert"],
+        synthetic_pki["ca_key"],
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        revoked_entries=[
+            (
+                987654321,
+                dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
+                x509.ReasonFlags.key_compromise,
+            )
+        ],
+        revoked_entry_extensions=[x509.Extension(unsupported.oid, True, unsupported)],
+    )
+    with pytest.raises(TrustSignatureError):
+        validate_crl_against_ca(crl, synthetic_pki["ca_cert"])
+
+
+def test_unavailable_actual_signer_is_not_reported_as_signature_invalid(synthetic_pki):
+    tsl, _, _, new_leaf_cert, _, new_crl = _build_rotated_issuer_fixture(synthetic_pki)
+    expired_old_crl = _build_crl(
+        synthetic_pki["ca_cert"],
+        synthetic_pki["ca_key"],
+        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
+        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+    )
+    resolver = KeyResolver.from_tsl(
+        tsl,
+        root_ca_cert=synthetic_pki["ants_root_cert"],
+        leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"], new_leaf_cert]},
+        crls_by_ca={"FR06": [expired_old_crl, new_crl]},
+    )
+    doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=dt.date(2022, 6, 15),
+        signature_date=dt.date(2022, 6, 15),
+        private_key=synthetic_pki["leaf_key"],
+    )
+    decoded = decode_2d_doc(
+        doc,
+        key_resolver=resolver,
+        evaluation_date=dt.date(2026, 11, 17),
+    )
+    assert decoded.is_valid is False
+    assert decoded.verification is not None
+    assert decoded.verification.status == VerificationStatus.RESOLVER_UNAVAILABLE
+
+
+def test_whole_document_reference_covers_outer_processing_instructions(synthetic_pki):
+    tampered = _build_fixture_tsl(synthetic_pki) + b"<?review tampered?>"
+    with pytest.raises(TrustSignatureError):
+        verify_tsl_xml_signature(tampered, synthetic_pki["ants_root_cert"])
+
+    valid = _build_fixture_tsl(
+        synthetic_pki,
+        document_suffix="<?review valid?>",
+    )
+    metadata = verify_tsl_xml_signature(valid, synthetic_pki["ants_root_cert"])
+    assert metadata.sequence_number == 99
 
 
 def _build_rotated_issuer_fixture(synthetic_pki):

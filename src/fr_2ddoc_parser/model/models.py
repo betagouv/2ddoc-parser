@@ -166,12 +166,28 @@ class Decoded2DDoc(BaseModel):
                 "Magasin de confiance (KeyResolver) indisponible.",
             )
 
+        unavailable_candidate_detail: str | None = None
         try:
+            resolve_candidate_set_fn = getattr(
+                key_resolver, "resolve_candidate_set_for_verification", None
+            )
             resolve_candidates_fn = getattr(
                 key_resolver, "resolve_candidates_for_verification", None
             )
             resolve_fn = getattr(key_resolver, "resolve_for_verification", None)
-            if callable(resolve_candidates_fn):
+            if callable(resolve_candidate_set_fn):
+                candidate_set = key_resolver.resolve_candidate_set_for_verification(
+                    self.header.ca_id,
+                    self.header.cert_id,
+                    reference_date=reference_date,
+                    evaluation_date=evaluation_date,
+                    tsl_eval_date=evaluation_date,
+                    strict_tsl_freshness=strict_tsl_freshness,
+                )
+                contexts = candidate_set.contexts
+                unavailable_candidate_detail = candidate_set.unavailable_detail
+                pubs = [ctx.leaf_cert.public_key() for ctx in contexts]
+            elif callable(resolve_candidates_fn):
                 contexts = key_resolver.resolve_candidates_for_verification(
                     self.header.ca_id,
                     self.header.cert_id,
@@ -215,6 +231,13 @@ class Decoded2DDoc(BaseModel):
                     return _finish(VerificationStatus.VERIFIED)
             except (ValueError, TypeError, TwoDDocSignatureError) as exc:
                 last_sig_err = exc
+
+        if unavailable_candidate_detail is not None:
+            return _finish(
+                VerificationStatus.RESOLVER_UNAVAILABLE,
+                "Un candidat de signature ne peut pas être évalué faute de preuve de révocation applicable: "
+                + unavailable_candidate_detail,
+            )
 
         if last_sig_err is not None:
             return _finish(VerificationStatus.SIGNATURE_INVALID, str(last_sig_err))

@@ -106,6 +106,14 @@ class VerifiedCertificateContext:
     tsl_freshness: TrustListFreshness
 
 
+@dataclass(frozen=True)
+class VerifiedCandidateSet:
+    """Candidats utilisables et incertitude résiduelle sur d'autres clés."""
+
+    contexts: list[VerifiedCertificateContext]
+    unavailable_detail: str | None = None
+
+
 def _parse_any_certs(data: bytes) -> list[x509.Certificate]:
     """Retourne tous les certificats X.509 trouvés dans ``data`` (PEM, DER ou multipart)."""
     found: list[x509.Certificate] = []
@@ -1004,7 +1012,7 @@ class KeyResolver:
         self._match_ca_for_leaf(ca, leaf_cert, expected_cert_id=cid)
         return leaf_cert.public_key()
 
-    def resolve_candidates_for_verification(
+    def resolve_candidate_set_for_verification(
         self,
         ca_id: str,
         cert_id: str,
@@ -1013,8 +1021,8 @@ class KeyResolver:
         evaluation_date: dt.date | None = None,
         tsl_eval_date: dt.date | None = None,
         strict_tsl_freshness: bool = True,
-    ) -> list[VerifiedCertificateContext]:
-        """Résout tous les certificats candidats valides et non révoqués pour ``(ca_id, cert_id)``."""
+    ) -> VerifiedCandidateSet:
+        """Résout les candidats et conserve toute indisponibilité concurrente."""
         effective_eval_date = evaluation_date or dt.datetime.now(dt.timezone.utc).date()
         effective_tsl_eval = (
             tsl_eval_date if tsl_eval_date is not None else evaluation_date
@@ -1101,7 +1109,12 @@ class KeyResolver:
                 )
 
         if valid_contexts:
-            return valid_contexts
+            return VerifiedCandidateSet(
+                contexts=valid_contexts,
+                unavailable_detail=(
+                    str(unavailable_err) if unavailable_err is not None else None
+                ),
+            )
         if unavailable_err is not None:
             raise unavailable_err
         if validity_err is not None:
@@ -1113,6 +1126,26 @@ class KeyResolver:
         raise UnknownCertificateError(
             f"Certificat introuvable pour AC={ca_id} cert_id={cert_id}"
         )
+
+    def resolve_candidates_for_verification(
+        self,
+        ca_id: str,
+        cert_id: str,
+        *,
+        reference_date: dt.date | None,
+        evaluation_date: dt.date | None = None,
+        tsl_eval_date: dt.date | None = None,
+        strict_tsl_freshness: bool = True,
+    ) -> list[VerifiedCertificateContext]:
+        """Résout tous les certificats candidats valides et non révoqués."""
+        return self.resolve_candidate_set_for_verification(
+            ca_id,
+            cert_id,
+            reference_date=reference_date,
+            evaluation_date=evaluation_date,
+            tsl_eval_date=tsl_eval_date,
+            strict_tsl_freshness=strict_tsl_freshness,
+        ).contexts
 
     def resolve_for_verification(
         self,

@@ -268,6 +268,22 @@ def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> b
     )
 
 
+def _canonicalize_document(document: minidom.Document, *, exclusive: bool) -> bytes:
+    """Canonicalise le node-set document complet, y compris les PI hors racine."""
+    try:
+        root = LET.fromstring(document.toxml().encode("utf-8"))
+    except LET.XMLSyntaxError as exc:
+        raise TrustSignatureError(
+            f"Document XML invalide lors de la canonicalisation: {exc}"
+        ) from exc
+    return LET.tostring(
+        root.getroottree(),
+        method="c14n",
+        exclusive=exclusive,
+        with_comments=False,
+    )
+
+
 def _canonicalize_subtree_exc(node: minidom.Element) -> bytes:
     """Alias rétrocompatible pour la canonicalisation C14N exclusive."""
     return _canonicalize_subtree(node, exclusive=True)
@@ -575,7 +591,7 @@ def verify_tsl_xml_signature(
             for ds_node in list(doc_sigs):
                 if remove_signature and ds_node.parentNode is doc_root:
                     doc_root.removeChild(ds_node)
-            c14n_bytes = _canonicalize_subtree(doc_root, exclusive=ref_exclusive)
+            c14n_bytes = _canonicalize_document(doc_clone, exclusive=ref_exclusive)
         elif uri.startswith("#"):
             target_el = _find_unique_element_by_id(root, uri[1:])
             c14n_bytes = _canonicalize_subtree(target_el, exclusive=ref_exclusive)
@@ -731,6 +747,14 @@ def validate_crl_against_ca(
             raise TrustSignatureError(
                 f"Extension critique CRL non supportée: {extension.oid.dotted_string}."
             )
+
+    for revoked_certificate in crl:
+        for extension in revoked_certificate.extensions:
+            if extension.critical:
+                raise TrustSignatureError(
+                    "Extension critique d'entrée CRL non supportée pour le certificat série "
+                    f"{revoked_certificate.serial_number}: {extension.oid.dotted_string}."
+                )
 
     ca_pub = ca_cert.public_key()
     if not isinstance(
