@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from html import unescape
 from http.client import HTTPMessage
@@ -112,6 +113,11 @@ class VerifiedCandidateSet:
 
     contexts: list[VerifiedCertificateContext]
     unavailable_detail: str | None = None
+
+
+_CANDIDATE_RESOLUTION_CAPTURE: ContextVar[list[VerifiedCandidateSet | None] | None] = (
+    ContextVar("candidate_resolution_capture", default=None)
+)
 
 
 def _parse_any_certs(data: bytes) -> list[x509.Certificate]:
@@ -1142,8 +1148,10 @@ class KeyResolver:
             type(self).resolve_candidates_for_verification
             is not KeyResolver.resolve_candidates_for_verification
         ):
-            return VerifiedCandidateSet(
-                contexts=self.resolve_candidates_for_verification(
+            capture: list[VerifiedCandidateSet | None] = [None]
+            token = _CANDIDATE_RESOLUTION_CAPTURE.set(capture)
+            try:
+                contexts = self.resolve_candidates_for_verification(
                     ca_id,
                     cert_id,
                     reference_date=reference_date,
@@ -1151,6 +1159,14 @@ class KeyResolver:
                     tsl_eval_date=tsl_eval_date,
                     strict_tsl_freshness=strict_tsl_freshness,
                 )
+            finally:
+                _CANDIDATE_RESOLUTION_CAPTURE.reset(token)
+            captured = capture[0]
+            return VerifiedCandidateSet(
+                contexts=contexts,
+                unavailable_detail=(
+                    captured.unavailable_detail if captured is not None else None
+                ),
             )
         return self._resolve_candidate_set_for_verification(
             ca_id,
@@ -1172,14 +1188,18 @@ class KeyResolver:
         strict_tsl_freshness: bool = True,
     ) -> list[VerifiedCertificateContext]:
         """Résout tous les certificats candidats valides et non révoqués."""
-        return self._resolve_candidate_set_for_verification(
+        result = self._resolve_candidate_set_for_verification(
             ca_id,
             cert_id,
             reference_date=reference_date,
             evaluation_date=evaluation_date,
             tsl_eval_date=tsl_eval_date,
             strict_tsl_freshness=strict_tsl_freshness,
-        ).contexts
+        )
+        capture = _CANDIDATE_RESOLUTION_CAPTURE.get()
+        if capture is not None:
+            capture[0] = result
+        return result.contexts
 
     def resolve_for_verification(
         self,

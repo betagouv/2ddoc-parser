@@ -637,6 +637,60 @@ def test_self_signed_and_rogue_certificates_rejected(synthetic_pki):
     assert decoded.verification.status == VerificationStatus.UNTRUSTED_CERTIFICATE
 
 
+def test_forwarding_subclass_preserves_candidate_uncertainty(synthetic_pki):
+    class ForwardingResolver(KeyResolver):
+        def resolve_candidates_for_verification(self, *args, **kwargs):
+            contexts = super().resolve_candidates_for_verification(*args, **kwargs)
+            return [ctx for ctx in contexts if ctx.ca_id == "FR06"]
+
+    tsl, _, new_leaf_key, new_leaf_cert, _, new_crl = _build_rotated_issuer_fixture(
+        synthetic_pki
+    )
+    expired_old_crl = _build_crl(
+        synthetic_pki["ca_cert"],
+        synthetic_pki["ca_key"],
+        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
+        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+    )
+    resolver = ForwardingResolver.from_tsl(
+        tsl,
+        root_ca_cert=synthetic_pki["ants_root_cert"],
+        leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"], new_leaf_cert]},
+        crls_by_ca={"FR06": [expired_old_crl, new_crl]},
+    )
+
+    def _decode(private_key):
+        doc = _build_signed_2ddoc(
+            ca_id="FR06",
+            cert_id="FPE2",
+            issue_date=dt.date(2022, 6, 15),
+            signature_date=dt.date(2022, 6, 15),
+            private_key=private_key,
+        )
+        return decode_2d_doc(
+            doc,
+            key_resolver=resolver,
+            evaluation_date=dt.date(2026, 11, 17),
+        )
+
+    unavailable = _decode(synthetic_pki["leaf_key"])
+    assert unavailable.verification is not None
+    assert unavailable.verification.status == VerificationStatus.RESOLVER_UNAVAILABLE
+
+    verified = _decode(new_leaf_key)
+    assert verified.is_valid is True
+    assert verified.verification is not None
+    assert verified.verification.status == VerificationStatus.VERIFIED
+
+    candidate_set = resolver.resolve_candidate_set_for_verification(
+        "FR06",
+        "FPE2",
+        reference_date=dt.date(2022, 6, 15),
+        evaluation_date=dt.date(2026, 11, 17),
+    )
+    assert candidate_set.unavailable_detail is not None
+
+
 def test_leaf_x509_constraints_enforced(synthetic_pki):
     """Validation stricte BasicConstraints, KeyUsage, AKI/SKI et CN 4 caractères."""
     ca_cert = synthetic_pki["ca_cert"]
