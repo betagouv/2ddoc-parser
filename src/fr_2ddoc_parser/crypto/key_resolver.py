@@ -1012,7 +1012,7 @@ class KeyResolver:
         self._match_ca_for_leaf(ca, leaf_cert, expected_cert_id=cid)
         return leaf_cert.public_key()
 
-    def resolve_candidate_set_for_verification(
+    def _resolve_candidate_set_for_verification(
         self,
         ca_id: str,
         cert_id: str,
@@ -1127,6 +1127,40 @@ class KeyResolver:
             f"Certificat introuvable pour AC={ca_id} cert_id={cert_id}"
         )
 
+    def resolve_candidate_set_for_verification(
+        self,
+        ca_id: str,
+        cert_id: str,
+        *,
+        reference_date: dt.date | None,
+        evaluation_date: dt.date | None = None,
+        tsl_eval_date: dt.date | None = None,
+        strict_tsl_freshness: bool = True,
+    ) -> VerifiedCandidateSet:
+        """Préserve les surcharges existantes tout en exposant l'incertitude."""
+        if (
+            type(self).resolve_candidates_for_verification
+            is not KeyResolver.resolve_candidates_for_verification
+        ):
+            return VerifiedCandidateSet(
+                contexts=self.resolve_candidates_for_verification(
+                    ca_id,
+                    cert_id,
+                    reference_date=reference_date,
+                    evaluation_date=evaluation_date,
+                    tsl_eval_date=tsl_eval_date,
+                    strict_tsl_freshness=strict_tsl_freshness,
+                )
+            )
+        return self._resolve_candidate_set_for_verification(
+            ca_id,
+            cert_id,
+            reference_date=reference_date,
+            evaluation_date=evaluation_date,
+            tsl_eval_date=tsl_eval_date,
+            strict_tsl_freshness=strict_tsl_freshness,
+        )
+
     def resolve_candidates_for_verification(
         self,
         ca_id: str,
@@ -1138,7 +1172,7 @@ class KeyResolver:
         strict_tsl_freshness: bool = True,
     ) -> list[VerifiedCertificateContext]:
         """Résout tous les certificats candidats valides et non révoqués."""
-        return self.resolve_candidate_set_for_verification(
+        return self._resolve_candidate_set_for_verification(
             ca_id,
             cert_id,
             reference_date=reference_date,

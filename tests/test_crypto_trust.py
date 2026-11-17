@@ -38,6 +38,7 @@ from fr_2ddoc_parser.crypto.key_resolver import (
 )
 from fr_2ddoc_parser.crypto.trust_validator import (
     TslMetadata,
+    _canonicalize_document,
     _canonicalize_subtree,
     check_certificate_revocation,
     validate_crl_against_ca,
@@ -2502,3 +2503,57 @@ def test_from_network_rejects_when_no_leaf_can_be_downloaded(
             root_ca_cert=synthetic_pki["ants_root_cert"],
             evaluation_date=dt.date(2026, 11, 17),
         )
+
+
+def test_c14n_preserves_character_reference_carriage_returns():
+    document = minidom.parseString("<r>a&#13;b</r>")
+    assert _canonicalize_document(document, exclusive=False) == b"<r>a&#xD;b</r>"
+
+
+def test_signed_character_reference_cr_is_accepted(synthetic_pki):
+    tsl = _build_fixture_tsl(
+        synthetic_pki,
+        tsp_uris={"FR06": "https://example.test/a&#13;b"},
+    )
+    metadata = verify_tsl_xml_signature(tsl, synthetic_pki["ants_root_cert"])
+    assert metadata.sequence_number == 99
+
+
+def test_lf_to_character_reference_cr_tampering_is_rejected(synthetic_pki):
+    tsl = _build_fixture_tsl(
+        synthetic_pki,
+        tsp_uris={"FR06": "https://example.test/a\nb"},
+    )
+    tampered = tsl.replace(
+        b"https://example.test/a\nb", b"https://example.test/a&#13;b"
+    )
+    with pytest.raises(TrustSignatureError):
+        verify_tsl_xml_signature(tampered, synthetic_pki["ants_root_cert"])
+
+
+def test_existing_candidate_resolution_override_is_preserved(synthetic_pki):
+    class PolicyResolver(KeyResolver):
+        def resolve_candidates_for_verification(self, *args, **kwargs):
+            raise UntrustedCertificateError("deployment policy denies this signer")
+
+    resolver = PolicyResolver.from_tsl(
+        synthetic_pki["tsl_bytes"],
+        root_ca_cert=synthetic_pki["ants_root_cert"],
+        leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"]]},
+        crls_by_ca={"FR06": [synthetic_pki["crl"]]},
+    )
+    doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=dt.date(2022, 6, 15),
+        signature_date=dt.date(2022, 6, 15),
+        private_key=synthetic_pki["leaf_key"],
+    )
+    decoded = decode_2d_doc(
+        doc,
+        key_resolver=resolver,
+        evaluation_date=dt.date(2026, 11, 17),
+    )
+    assert decoded.is_valid is False
+    assert decoded.verification is not None
+    assert decoded.verification.status == VerificationStatus.UNTRUSTED_CERTIFICATE

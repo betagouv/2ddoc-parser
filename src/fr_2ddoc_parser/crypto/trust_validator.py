@@ -227,6 +227,13 @@ def _element_text(element: minidom.Element | None) -> str:
     return "".join(parts).strip()
 
 
+def _serialize_minidom_for_lxml(node: minidom.Node) -> bytes:
+    """Préserve les CR issus de références avant la seconde analyse XML."""
+    # Le premier parse minidom a déjà normalisé les CR littéraux du document source.
+    # Ceux qui restent dans l'arbre doivent être rééchappés pour ne pas devenir des LF.
+    return node.toxml().replace("\r", "&#13;").encode("utf-8")
+
+
 def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> bytes:
     """Canonicalise un sous-arbre avec C14N 1.0 inclusif ou exclusif via libxml2."""
     ns_map: dict[str, str] = {}
@@ -255,7 +262,7 @@ def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> b
             clone.setAttribute(attr_name, attr_value)
 
     try:
-        element = LET.fromstring(clone.toxml().encode("utf-8"))
+        element = LET.fromstring(_serialize_minidom_for_lxml(clone))
     except LET.XMLSyntaxError as exc:
         raise TrustSignatureError(
             f"Noeud XML invalide lors de la canonicalisation: {exc}"
@@ -271,7 +278,7 @@ def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> b
 def _canonicalize_document(document: minidom.Document, *, exclusive: bool) -> bytes:
     """Canonicalise le node-set document complet, y compris les PI hors racine."""
     try:
-        root = LET.fromstring(document.toxml().encode("utf-8"))
+        root = LET.fromstring(_serialize_minidom_for_lxml(document))
     except LET.XMLSyntaxError as exc:
         raise TrustSignatureError(
             f"Document XML invalide lors de la canonicalisation: {exc}"
