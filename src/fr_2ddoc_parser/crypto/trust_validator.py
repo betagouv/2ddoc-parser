@@ -9,7 +9,7 @@ import xml.dom.minidom as minidom
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import TypeVar
 from xml.parsers.expat import ExpatError
 
@@ -39,10 +39,13 @@ XADES_NS = "http://uri.etsi.org/01903/v1.3.2#"
 _CERT_ID_RE = re.compile(r"^[A-Za-z0-9]{4}$")
 _FORBIDDEN_XML_DECL_RE = re.compile(rb"<!\s*(DOCTYPE|ENTITY)\b", re.IGNORECASE)
 
+_C14N_EXC = "http://www.w3.org/2001/10/xml-exc-c14n#"
+_C14N_INC = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+
 _ALLOWED_C14N_ALGS = frozenset(
     {
-        "http://www.w3.org/2001/10/xml-exc-c14n#",
-        "http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+        _C14N_EXC,
+        _C14N_INC,
     }
 )
 
@@ -139,11 +142,23 @@ def validate_leaf_against_ca(
 
     Vérifie :
       1. Signature directe par l'AC (``verify_directly_issued_by``).
-      2. ``BasicConstraints.ca == False`` (si l'extension est présente).
-      3. ``KeyUsage.digital_signature == True``.
-      4. Cohérence ``AuthorityKeyIdentifier == ca.SubjectKeyIdentifier`` (si présents).
-      5. ``CommonName`` exact de 4 caractères alphanumériques.
+      2. Contraintes d'AC sur ``ca_cert`` (``BasicConstraints.ca == True``, ``KeyUsage.key_cert_sign == True``).
+      3. ``BasicConstraints.ca == False`` sur la feuille (si l'extension est présente).
+      4. ``KeyUsage.digital_signature == True`` sur la feuille.
+      5. Cohérence ``AuthorityKeyIdentifier == ca.SubjectKeyIdentifier`` (si présents).
+      6. ``CommonName`` exact de 4 caractères alphanumériques.
     """
+    ca_bc = _get_extension(ca_cert, x509.BasicConstraints)
+    if ca_bc is None or not ca_bc.ca:
+        raise UntrustedCertificateError(
+            "Le certificat émetteur (AC) doit avoir BasicConstraints CA=True."
+        )
+    ca_ku = _get_extension(ca_cert, x509.KeyUsage)
+    if ca_ku is None or not ca_ku.key_cert_sign:
+        raise UntrustedCertificateError(
+            "Le certificat émetteur (AC) doit autoriser keyCertSign."
+        )
+
     try:
         leaf_cert.verify_directly_issued_by(ca_cert)
     except (InvalidSignature, ValueError, TypeError, UnsupportedAlgorithm) as exc:
@@ -190,9 +205,12 @@ def _parse_iso_datetime(raw: str | None) -> datetime | None:
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _element_text(element: minidom.Element | None) -> str:
@@ -205,8 +223,8 @@ def _element_text(element: minidom.Element | None) -> str:
     return "".join(parts).strip()
 
 
-def _canonicalize_subtree_exc(node: minidom.Element) -> bytes:
-    """Canonicalise un sous-arbre XML en préservant les déclarations xmlns utilisées."""
+def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> bytes:
+    """Canonicalise un sous-arbre XML selon C14N exclusif ou inclusif."""
     ns_map: dict[str, str] = {}
     cur: minidom.Node | None = node
     while cur is not None and isinstance(cur, minidom.Element):
@@ -219,42 +237,51 @@ def _canonicalize_subtree_exc(node: minidom.Element) -> bytes:
                     ns_map.setdefault(attr.name, attr.value)
         cur = cur.parentNode
 
-    used_ns_attrs: set[str] = set()
+    if exclusive:
+        used_ns_attrs: set[str] = set()
 
-    def _walk(el: minidom.Node) -> None:
-        if not isinstance(el, minidom.Element):
-            return
-        if ":" in el.tagName:
-            prefix = el.tagName.split(":", 1)[0]
-            if prefix != "xml":
-                used_ns_attrs.add(f"xmlns:{prefix}")
-        elif el.namespaceURI:
-            used_ns_attrs.add("xmlns")
+        def _walk(el: minidom.Node) -> None:
+            if not isinstance(el, minidom.Element):
+                return
+            if ":" in el.tagName:
+                prefix = el.tagName.split(":", 1)[0]
+                if prefix != "xml":
+                    used_ns_attrs.add(f"xmlns:{prefix}")
+            elif el.namespaceURI:
+                used_ns_attrs.add("xmlns")
 
-        if el.attributes:
-            for i in range(el.attributes.length):
-                attr = el.attributes.item(i)
-                if not isinstance(attr, minidom.Attr):
-                    continue
-                if ":" in attr.name and not attr.name.startswith("xmlns:"):
-                    prefix = attr.name.split(":", 1)[0]
-                    if prefix != "xml":
-                        used_ns_attrs.add(f"xmlns:{prefix}")
+            if el.attributes:
+                for i in range(el.attributes.length):
+                    attr = el.attributes.item(i)
+                    if not isinstance(attr, minidom.Attr):
+                        continue
+                    if ":" in attr.name and not attr.name.startswith("xmlns:"):
+                        prefix = attr.name.split(":", 1)[0]
+                        if prefix != "xml":
+                            used_ns_attrs.add(f"xmlns:{prefix}")
 
-        for child in el.childNodes:
-            _walk(child)
+            for child in el.childNodes:
+                _walk(child)
 
-    _walk(node)
+        _walk(node)
+        ns_attrs_to_copy = sorted(used_ns_attrs)
+    else:
+        ns_attrs_to_copy = sorted(ns_map.keys())
 
     clone = node.cloneNode(deep=True)
     if not isinstance(clone, minidom.Element):
         raise TrustSignatureError("Noeud XML invalide lors de la canonicalisation.")
-    for ns_attr in sorted(used_ns_attrs):
+    for ns_attr in ns_attrs_to_copy:
         if ns_attr in ns_map and not clone.hasAttribute(ns_attr):
             clone.setAttribute(ns_attr, ns_map[ns_attr])
 
     canonical = ET.canonicalize(clone.toxml())
     return canonical.encode("utf-8")
+
+
+def _canonicalize_subtree_exc(node: minidom.Element) -> bytes:
+    """Alias rétrocompatible pour la canonicalisation C14N exclusive."""
+    return _canonicalize_subtree(node, exclusive=True)
 
 
 def _direct_children_ns(
@@ -294,6 +321,19 @@ def _find_unique_element_by_id(
     return matches[0]
 
 
+def _resolve_reference_c14n_exclusive(
+    ref_el: minidom.Element, *, default_exclusive: bool
+) -> bool:
+    """Détermine si une référence ds:Reference utilise C14N exclusif selon ds:Transforms."""
+    transforms_els = _direct_children_ns(ref_el, DS_NS, "Transforms")
+    for transforms_el in transforms_els:
+        for transform_el in _direct_children_ns(transforms_el, DS_NS, "Transform"):
+            alg = transform_el.getAttribute("Algorithm")
+            if alg in _ALLOWED_C14N_ALGS:
+                return alg == _C14N_EXC
+    return default_exclusive
+
+
 def verify_tsl_xml_signature(
     xml_bytes: bytes,
     root_ca_cert: x509.Certificate,
@@ -305,9 +345,10 @@ def verify_tsl_xml_signature(
     Protections appliquées :
       - Rejet immédiat de toute déclaration ``<!DOCTYPE`` ou ``<!ENTITY``.
       - Unicité et ancrage direct de ``<ds:Signature>`` sous la racine (anti-XSW).
-      - Vérification du certificat signataire contre ``root_ca_cert``.
+      - Vérification du certificat signataire contre ``root_ca_cert`` (``KeyUsage``, ``AKI == SKI``).
       - Vérification des condensats SHA-256/384/512 de toutes les ``<ds:Reference>``.
       - Vérification de la signature RSA-SHA256/384/512 sur ``<ds:SignedInfo>``.
+      - Validation obligatoire des métadonnées ``ListIssueDateTime`` et ``NextUpdate``.
     """
     if not xml_bytes or _FORBIDDEN_XML_DECL_RE.search(xml_bytes):
         raise TrustSignatureError(
@@ -387,9 +428,21 @@ def verify_tsl_xml_signature(
             "Le certificat signataire TSL ne doit pas être une autorité de certification."
         )
     signer_ku = _get_extension(signer_cert, x509.KeyUsage)
-    if signer_ku is not None and not signer_ku.digital_signature:
+    if signer_ku is None or not signer_ku.digital_signature:
         raise TrustSignatureError(
-            "Le certificat signataire TSL n'autorise pas digitalSignature."
+            "Le certificat signataire TSL doit posséder KeyUsage.digitalSignature."
+        )
+
+    signer_aki = _get_extension(signer_cert, x509.AuthorityKeyIdentifier)
+    root_ski = _get_extension(root_ca_cert, x509.SubjectKeyIdentifier)
+    if (
+        signer_aki is not None
+        and signer_aki.key_identifier is not None
+        and root_ski is not None
+        and signer_aki.key_identifier != root_ski.digest
+    ):
+        raise TrustSignatureError(
+            "Incohérence AuthorityKeyIdentifier / SubjectKeyIdentifier entre le signataire TSL et l'ancre ANTS."
         )
 
     # Algorithmes autorisés (enfants directs de ds:SignedInfo)
@@ -403,6 +456,7 @@ def verify_tsl_xml_signature(
         raise TrustSignatureError(
             f"Algorithme de canonicalisation TSL non supporté: {c14n_alg!r}"
         )
+    signed_info_exclusive = c14n_alg == _C14N_EXC
 
     sig_method_els = _direct_children_ns(signed_info_el, DS_NS, "SignatureMethod")
     if len(sig_method_els) != 1:
@@ -442,6 +496,10 @@ def verify_tsl_xml_signature(
         except Exception as exc:
             raise TrustSignatureError(f"DigestValue base64 invalide: {exc}") from exc
 
+        ref_exclusive = _resolve_reference_c14n_exclusive(
+            ref_el, default_exclusive=signed_info_exclusive
+        )
+
         target_el: minidom.Element | None = None
         if uri == "":
             has_doc_ref = True
@@ -456,10 +514,10 @@ def verify_tsl_xml_signature(
             for ds_node in list(doc_sigs):
                 if ds_node.parentNode is doc_root:
                     doc_root.removeChild(ds_node)
-            c14n_bytes = ET.canonicalize(doc_root.toxml()).encode("utf-8")
+            c14n_bytes = _canonicalize_subtree(doc_root, exclusive=ref_exclusive)
         elif uri.startswith("#"):
             target_el = _find_unique_element_by_id(root, uri[1:])
-            c14n_bytes = _canonicalize_subtree_exc(target_el)
+            c14n_bytes = _canonicalize_subtree(target_el, exclusive=ref_exclusive)
         else:
             raise TrustSignatureError(
                 f"URI de référence XML-DSig non supportée: {uri!r}"
@@ -489,7 +547,9 @@ def verify_tsl_xml_signature(
             "La clé du certificat signataire TSL doit être une clé RSA."
         )
 
-    c14n_signed_info = _canonicalize_subtree_exc(signed_info_el)
+    c14n_signed_info = _canonicalize_subtree(
+        signed_info_el, exclusive=signed_info_exclusive
+    )
     try:
         signer_pub.verify(
             signature_bytes, c14n_signed_info, padding.PKCS1v15(), rsa_hash
@@ -525,6 +585,15 @@ def verify_tsl_xml_signature(
         if dt_els:
             next_update = _parse_iso_datetime(_element_text(dt_els[0]))
 
+    if issue_date is None or next_update is None:
+        raise TrustSignatureError(
+            "Métadonnées TSL incomplètes ou invalides (ListIssueDateTime et NextUpdate requis)."
+        )
+    if issue_date > next_update:
+        raise TrustSignatureError(
+            f"Dates de la TSL incohérentes (ListIssueDateTime={issue_date} postérieur à NextUpdate={next_update})."
+        )
+
     # SigningTime lu exclusivement depuis un <xades:SignedProperties> couvert par ds:Reference
     signing_time: datetime | None = None
     for sp_el in verified_signed_props:
@@ -539,13 +608,25 @@ def verify_tsl_xml_signature(
 
     if check_signer_validity:
         ref_dt = signing_time or issue_date
-        if ref_dt is not None and not (
+        if ref_dt is None:
+            raise TrustSignatureError(
+                "Impossible de vérifier la validité temporelle du signataire TSL (SigningTime et ListIssueDateTime absents)."
+            )
+        if not (
             signer_cert.not_valid_before_utc
             <= ref_dt
             <= signer_cert.not_valid_after_utc
         ):
             raise TrustSignatureError(
                 "Le certificat signataire TSL n'était pas valide à la date de signature de la TSL."
+            )
+        if not (
+            root_ca_cert.not_valid_before_utc
+            <= ref_dt
+            <= root_ca_cert.not_valid_after_utc
+        ):
+            raise TrustSignatureError(
+                "L'ancre de confiance ANTS n'était pas valide à la date de signature de la TSL."
             )
 
     return TslMetadata(
@@ -559,7 +640,18 @@ def verify_tsl_xml_signature(
 def validate_crl_against_ca(
     crl: x509.CertificateRevocationList, ca_cert: x509.Certificate
 ) -> None:
-    """Vérifie l'émetteur, la signature et la cohérence temporelle d'une CRL contre son AC."""
+    """Vérifie l'émetteur, les contraintes d'AC, la signature et les dates d'une CRL."""
+    ca_bc = _get_extension(ca_cert, x509.BasicConstraints)
+    if ca_bc is None or not ca_bc.ca:
+        raise TrustSignatureError(
+            "Le certificat émetteur de la CRL doit avoir BasicConstraints CA=True."
+        )
+    ca_ku = _get_extension(ca_cert, x509.KeyUsage)
+    if ca_ku is None or not ca_ku.crl_sign:
+        raise TrustSignatureError(
+            "Le certificat émetteur de la CRL doit autoriser cRLSign."
+        )
+
     if crl.issuer != ca_cert.subject:
         raise TrustSignatureError(
             "L'émetteur de la CRL ne correspond pas au sujet de l'AC."
@@ -629,6 +721,12 @@ def check_certificate_revocation(
             )
 
 
+def _to_utc_date(value: datetime) -> date:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc).date()
+    return value.astimezone(timezone.utc).date()
+
+
 def validate_certificate_dates(
     leaf_cert: x509.Certificate,
     ca_cert: x509.Certificate,
@@ -640,10 +738,12 @@ def validate_certificate_dates(
     """Vérifie la validité temporelle de la feuille et de l'AC à ``reference_date``.
 
     Si ``reference_date`` est défini (``signature_date`` ou ``issue_date``) :
-      un certificat expiré aujourd'hui mais valide à ``reference_date`` est ACCEPTÉ.
+      un certificat expiré aujourd'hui mais valide à ``reference_date`` est ACCEPTÉ
+      (sous réserve de ``PrivateKeyUsagePeriod`` si présente sur la feuille).
     Si ``reference_date`` est ``None`` (``FFFF``) :
       vérifie la validité à ``evaluation_date`` (date courante UTC par défaut).
     """
+    del ca_status_start  # Conservé uniquement pour compatibilité d'appel et tri TSL.
     check_date = reference_date if reference_date is not None else evaluation_date
 
     leaf_start = leaf_cert.not_valid_before_utc.date()
@@ -660,8 +760,18 @@ def validate_certificate_dates(
             f"Certificat AC hors période de validité [{ca_start}, {ca_end}] pour la date {check_date}."
         )
 
-    if reference_date is not None and ca_status_start is not None:
-        if reference_date < ca_status_start.date():
-            raise CertificateValidityError(
-                f"Date de référence {reference_date} antérieure à l'entrée en service TSL de l'AC ({ca_status_start.date()})."
-            )
+    if reference_date is not None:
+        pkup = _get_extension(leaf_cert, x509.PrivateKeyUsagePeriod)
+        if pkup is not None:
+            if pkup.not_before is not None:
+                pk_start = _to_utc_date(pkup.not_before)
+                if reference_date < pk_start:
+                    raise CertificateValidityError(
+                        f"Clé privée utilisée avant PrivateKeyUsagePeriod.not_before ({pk_start}) pour la date {reference_date}."
+                    )
+            if pkup.not_after is not None:
+                pk_end = _to_utc_date(pkup.not_after)
+                if reference_date > pk_end:
+                    raise CertificateValidityError(
+                        f"Clé privée utilisée après PrivateKeyUsagePeriod.not_after ({pk_end}) pour la date {reference_date}."
+                    )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-import shutil
+import os
 import tempfile
 from pathlib import Path
 
@@ -37,6 +37,23 @@ def _default_keys_dir() -> Path:
     return Path(__file__).resolve().parent / "keys"
 
 
+def _atomic_sync_dir(src_dir: Path, dst_dir: Path) -> None:
+    """Remplace atomiquement le contenu de ``dst_dir`` depuis ``src_dir`` sur le même FS."""
+    if not dst_dir.exists():
+        os.replace(src_dir, dst_dir)
+        return
+
+    desired_names: set[str] = set()
+    for src_file in sorted(src_dir.iterdir()):
+        if src_file.is_file():
+            desired_names.add(src_file.name)
+            os.replace(src_file, dst_dir / src_file.name)
+
+    for existing_file in list(dst_dir.iterdir()):
+        if existing_file.is_file() and existing_file.name not in desired_names:
+            existing_file.unlink()
+
+
 def sync_trust_store(
     output_dir: Path | None = None,
     *,
@@ -47,7 +64,7 @@ def sync_trust_store(
     """Télécharge, vérifie cryptographiquement et écrit le snapshot de confiance ANTS.
 
     Aucun fichier cible n'est modifié tant que la TSL, toutes les chaînes
-    AC -> feuille et les CRLs n'ont pas été vérifiées cryptographiquement.
+    AC -> feuille et les CRLs de chaque AC retenue n'ont pas été vérifiées cryptographiquement.
     """
     target_dir = (output_dir or _default_keys_dir()).resolve()
     anchor_path = (root_ca_path or target_dir / "ants_tsl_root_ca.pem").resolve()
@@ -129,7 +146,7 @@ def sync_trust_store(
             "AC %s : %d certificat(s) feuille(s) vérifié(s)", ca_id, len(sorted_leaves)
         )
 
-        # CRLs depuis les CDPs des feuilles vérifiées
+        # CRLs depuis les CDPs des feuilles vérifiées (obligatoire pour chaque AC retenue)
         crl_urls = extract_crl_urls_from_certs([c for _, c in sorted_leaves])
         for crl_url in crl_urls:
             crl_bytes = _fetch_bytes(crl_url, timeout=timeout)
@@ -159,13 +176,22 @@ def sync_trust_store(
             if matched_crl:
                 break
 
+        if ca_id not in crl_der_by_ca:
+            raise ResolverUnavailableError(
+                f"Aucune CRL valide récupérée pour l'AC {ca_id} (abandon fail-closed)."
+            )
+
     if total_leaves == 0:
         raise ResolverUnavailableError(
             "Aucun certificat feuille vérifié téléchargé : abandon de la synchronisation."
         )
 
-    # Écriture dans un dossier temporaire puis mise à jour propre de target_dir
-    with tempfile.TemporaryDirectory() as tmp_str:
+    # Staging sur le même système de fichiers (target_dir.parent), validation puis promotion atomique
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{target_dir.name}.staging-",
+        dir=target_dir.parent,
+    ) as tmp_str:
         tmp_dir = Path(tmp_str)
         (tmp_dir / "ants_tsl_root_ca.pem").write_bytes(anchor_pem)
         (tmp_dir / "tsl_signed.xml").write_bytes(tsl_bytes)
@@ -181,21 +207,15 @@ def sync_trust_store(
             (crls_tmp / f"{ca_id}.crl").write_bytes(der_crl)
 
         # Validation complète du magasin stagé avant promotion
-        KeyResolver.from_trust_store(tmp_dir)
+        KeyResolver.from_trust_store(tmp_dir, require_crls=True)
 
         target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / "ants_tsl_root_ca.pem").write_bytes(anchor_pem)
-        (target_dir / "tsl_signed.xml").write_bytes(tsl_bytes)
-
-        target_leaves = target_dir / "trusted_leaves"
-        if target_leaves.exists():
-            shutil.rmtree(target_leaves)
-        shutil.copytree(leaves_tmp, target_leaves)
-
-        target_crls = target_dir / "crls"
-        if target_crls.exists():
-            shutil.rmtree(target_crls)
-        shutil.copytree(crls_tmp, target_crls)
+        _atomic_sync_dir(leaves_tmp, target_dir / "trusted_leaves")
+        _atomic_sync_dir(crls_tmp, target_dir / "crls")
+        os.replace(
+            tmp_dir / "ants_tsl_root_ca.pem", target_dir / "ants_tsl_root_ca.pem"
+        )
+        os.replace(tmp_dir / "tsl_signed.xml", target_dir / "tsl_signed.xml")
 
     logger.info(
         "Magasin de confiance mis à jour dans %s (%d feuilles, %d CRLs)",
@@ -203,7 +223,7 @@ def sync_trust_store(
         total_leaves,
         len(crl_der_by_ca),
     )
-    return KeyResolver.from_trust_store(target_dir)
+    return KeyResolver.from_trust_store(target_dir, require_crls=True)
 
 
 def main(argv: list[str] | None = None) -> int:

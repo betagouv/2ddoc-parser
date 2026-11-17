@@ -53,7 +53,7 @@ sequenceDiagram
         Ops->>Val: validate_leaf_against_ca(leaf, ca_cert)
         Ops->>Val: validate_crl_against_ca(crl, ca_cert)
     end
-    Ops->>Store: Stage in temp dir, validate KeyResolver.from_trust_store(), atomically promote
+    Ops->>Store: Stage on same FS, validate KeyResolver.from_trust_store(require_crls=True), atomically replace
 
     Note over Store,Runtime: Runtime execution (zero network I/O)
     Runtime->>Store: Lazy-load via get_default_key_resolver()
@@ -73,8 +73,8 @@ flowchart TD
     SIG_PRES -- No --> ST_MISS["SIGNATURE_MISSING<br/>is_valid = False"]
     SIG_PRES -- Yes --> RES_AVAIL{"KeyResolver<br/>available?"}
     RES_AVAIL -- No --> ST_UNAVAIL["RESOLVER_UNAVAILABLE<br/>is_valid = False"]
-    RES_AVAIL -- Yes --> TSL_FRESH{"strict_tsl_freshness<br/>and eval > NextUpdate?"}
-    TSL_FRESH -- Yes --> ST_EXP["TRUST_LIST_EXPIRED<br/>tsl_freshness = STALE"]
+    RES_AVAIL -- Yes --> TSL_FRESH{"strict_tsl_freshness<br/>and freshness != FRESH?"}
+    TSL_FRESH -- Yes --> ST_EXP["TRUST_LIST_EXPIRED<br/>tsl_freshness = STALE/UNKNOWN"]
     TSL_FRESH -- No --> CA_OK{"ca_id in TSL?"}
     CA_OK -- No --> ST_CA["UNKNOWN_CA<br/>is_valid = False"]
     CA_OK -- Yes --> CERT_OK{"(ca_id, cert_id) in<br/>validated leaf index?"}
@@ -85,7 +85,7 @@ flowchart TD
     CRL_OK -- No --> ST_REV["CERT_REVOKED<br/>is_valid = False"]
     CRL_OK -- Yes --> DATE_OK{"Valid at ref_date<br/>(or eval_date if FFFF)?"}
     DATE_OK -- No --> ST_DATE["CERT_NOT_VALID_AT_SIGNING<br/>is_valid = False"]
-    DATE_OK -- Yes --> MATH_OK{"ECDSA / RSA signature<br/>matches sign_payload?"}
+    DATE_OK -- Yes --> MATH_OK{"ECDSA / RSA signature<br/>matches any valid candidate?"}
     MATH_OK -- No --> ST_SIGINV["SIGNATURE_INVALID<br/>is_valid = False"]
     MATH_OK -- Yes --> ST_OK["VERIFIED<br/>is_valid = True"]
 ```
@@ -97,27 +97,35 @@ flowchart TD
 ### 4.1. XML-DSig & XSW Hardening (`verify_tsl_xml_signature`)
 - Rejects empty payloads and any `<!DOCTYPE` or `<!ENTITY` declaration before XML parsing.
 - Enforces structural uniqueness: exactly one `<ds:Signature>` element whose direct parent is the root `<tsl:TrustServiceStatusList>` element (prevents XML Signature Wrapping attacks).
-- Restricts algorithms to `RSA-SHA256/384/512`, `SHA-256/384/512` digests, and standard C14N / Exc-C14N canonicalization.
+- Restricts algorithms to `RSA-SHA256/384/512`, `SHA-256/384/512` digests, and Inclusive C14N (`REC-xml-c14n-20010315`) / Exclusive C14N (`xml-exc-c14n#`) canonicalization.
 - Requires `<ds:Reference URI="">` covering the full document (minus `<ds:Signature>`) and verifies every `#id`-targeted `<ds:Reference>` (including `<xades:SignedProperties>`) using constant-time `hmac.compare_digest`.
-- Verifies the TSL signer certificate directly against `ants_tsl_root_ca.pem` (`BasicConstraints.ca` must not be `True`; `KeyUsage.digital_signature` must hold if present; signer validity checked at `xades:SigningTime` or `tsl:ListIssueDateTime`).
+- Verifies the TSL signer certificate directly against `ants_tsl_root_ca.pem` (`BasicConstraints.ca` must not be `True`; `KeyUsage.digital_signature` is required; `AuthorityKeyIdentifier == root.SubjectKeyIdentifier` when both are present).
+- Requires valid `tsl:ListIssueDateTime` and `tsl:NextUpdate` (`issue_date <= next_update`), and verifies that `xades:SigningTime` (or `tsl:ListIssueDateTime`) falls within the validity windows of both the TSL signer certificate and the ANTS root trust anchor.
 
 ### 4.2. X.509 Leaf & CRL Constraints (`validate_leaf_against_ca`, `validate_crl_against_ca`)
+- Issuing CA certificate must possess `BasicConstraints(ca=True)` and `KeyUsage(key_cert_sign=True)` for leaves, and `BasicConstraints(ca=True)` and `KeyUsage(crl_sign=True)` for CRLs.
 - Leaf certificate must satisfy `leaf_cert.verify_directly_issued_by(ca_cert)`.
-- `BasicConstraints.ca` must be `False` (if extension present).
-- `KeyUsage.digital_signature` must be `True` (extension required).
+- `BasicConstraints.ca` must be `False` on the leaf (if extension present).
+- `KeyUsage.digital_signature` must be `True` on the leaf (extension required).
 - `AuthorityKeyIdentifier.key_identifier` must match `ca_cert` `SubjectKeyIdentifier.digest` when both are present.
 - `Subject` must contain a single `CommonName` (`CN`) matching `^[A-Za-z0-9]{4}$`, which serves as the sole authoritative `cert_id` lookup key (no heuristic truncation, no single-cert fallback).
 - Each CRL must match `crl.issuer == ca_cert.subject`, pass `crl.is_signature_valid(ca_cert.public_key())`, and satisfy `last_update <= next_update`.
+- `KeyResolver.from_trust_store(..., require_crls=True)` and `sync_trust_store()` fail closed if any active CA with loaded leaf certificates is missing a validated CRL.
 
-### 4.3. Temporal Validity & Revocation Rules
+### 4.3. Temporal Validity, Rotation & Revocation Rules
 - **Reference date (`reference_date`)**: Derived from `header.signature_date` if present, else `header.issue_date`.
-- **Historical validity**: If `reference_date` is present, both the leaf certificate and the CA certificate must be valid at `reference_date` (and `reference_date >= ca.status_start` when specified in the TSL). **A document validly signed in the past remains `VERIFIED` even if the certificate has since expired.**
+- **Historical validity & PrivateKeyUsagePeriod**: If `reference_date` is present, both the leaf certificate and the CA certificate must be valid at `reference_date`, and any `PrivateKeyUsagePeriod` (`2.5.29.16`) bounds on the leaf certificate must contain `reference_date`. **A document validly signed in the past remains `VERIFIED` even if the certificate has since expired.**
+- **Certificate rotation**: Multiple leaf certificates sharing the same `(ca_id, cert_id)` (different serial numbers / validity periods) coexist in `KeyResolver`; verification evaluates all valid, non-revoked candidates for `reference_date` (including overlapping validity windows).
 - **Undated headers (`FFFF`)**: When both `signature_date` and `issue_date` are `None`, validity is evaluated against `evaluation_date` (default: current UTC date).
 - **Revocation (`check_certificate_revocation`)**: A certificate listed in its CA's signed CRL is rejected with `CERT_REVOKED` when:
   - `reference_date is None`, OR
   - the CRL reason is `key_compromise` or `ca_compromise`, OR
   - `reference_date >= revocation_date`.
-- **TSL Freshness (`strict_tsl_freshness`)**: By default (`strict_tsl_freshness=True`), evaluation past `tsl:NextUpdate` fails closed with `VerificationStatus.TRUST_LIST_EXPIRED` and `tsl_freshness = TrustListFreshness.STALE`.
+- **TSL Freshness (`strict_tsl_freshness`)**: By default (`strict_tsl_freshness=True`), evaluation when `tsl_freshness != TrustListFreshness.FRESH` (`STALE` or `UNKNOWN`) fails closed with `VerificationStatus.TRUST_LIST_EXPIRED`.
+
+### 4.4. Network Fetch Hardening (`sync_trust_store` / `from_network`)
+- Rejects non-HTTP(S) schemes and private, loopback, link-local, multicast, reserved, or unspecified IP literals and `.local`/`.localhost` hostnames.
+- Enforces redirect validation via `_SafeRedirectHandler` (blocking unsafe targets and `https:// -> http://` downgrades) and caps extracted directory links per page (`_MAX_LINKS_PER_PAGE = 500`) and response payload size (`10 MiB`).
 
 ---
 
@@ -132,9 +140,9 @@ flowchart TD
 | `unknown_cert` | `False` | Header `cert_id` has no validated leaf certificate under `ca_id`. |
 | `untrusted_certificate` | `False` | Leaf certificate failed CA signature or X.509 constraint validation. |
 | `cert_revoked` | `False` | Leaf certificate is revoked in its CA's signed CRL for the signing context. |
-| `cert_not_valid_at_signing` | `False` | Reference date (or current date when `FFFF`) falls outside leaf/CA validity bounds. |
-| `trust_list_expired` | `False` | TSL `NextUpdate` exceeded while `strict_tsl_freshness=True`. |
-| `resolver_unavailable` | `False` | Trust store missing, unreadable, or failed integrity verification. |
+| `cert_not_valid_at_signing` | `False` | Reference date (or current date when `FFFF`) falls outside leaf/CA/`PrivateKeyUsagePeriod` validity bounds. |
+| `trust_list_expired` | `False` | TSL `NextUpdate` exceeded or missing (`STALE` / `UNKNOWN`) while `strict_tsl_freshness=True`. |
+| `resolver_unavailable` | `False` | Trust store missing, unreadable, missing CRLs, or failed integrity verification. |
 
 ---
 

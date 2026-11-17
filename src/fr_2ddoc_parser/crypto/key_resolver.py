@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import ipaddress
 import logging
 import os
 import re
@@ -13,6 +14,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from html import unescape
+from http.client import HTTPMessage
 from importlib.resources import files
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -24,8 +26,10 @@ from pydantic import BaseModel, ConfigDict
 
 from fr_2ddoc_parser.crypto.helper import _scan_der_certs
 from fr_2ddoc_parser.crypto.trust_validator import (
+    _FORBIDDEN_XML_DECL_RE,
     TslMetadata,
     _get_extension,
+    _parse_iso_datetime,
     check_certificate_revocation,
     validate_certificate_dates,
     validate_crl_against_ca,
@@ -33,6 +37,8 @@ from fr_2ddoc_parser.crypto.trust_validator import (
     verify_tsl_xml_signature,
 )
 from fr_2ddoc_parser.exception.exceptions import (
+    CertificateRevokedError,
+    CertificateValidityError,
     ResolverUnavailableError,
     TrustListExpiredError,
     TrustSignatureError,
@@ -50,7 +56,9 @@ logger = logging.getLogger(__name__)
 ENV_TRUST_STORE_DIR = "FR_2DDOC_TRUST_STORE_DIR"
 DEFAULT_TSL_URL = "https://pub.ants.gouv.fr/2D-DOC/V1/PRD/01_TSL/tsl_signed.xml"
 _MAX_FETCH_BYTES = 10 * 1024 * 1024  # 10 MiB
+_MAX_LINKS_PER_PAGE = 500
 _CA_ID_RE = re.compile(r"^FR\d{2}$")
+_DEFAULT_URLOPEN = urllib.request.urlopen
 
 # Namespace map (TSL ETSI)
 NS = {
@@ -61,8 +69,6 @@ NS = {
 
 # Statut accepté (service actif / en-conformité)
 SVCSTATUS_INACCORD = "http://uri.etsi.org/TrstSvc/Svcstatus/inaccord"
-
-_FORBIDDEN_XML_DECL_RE = re.compile(rb"<!\s*(DOCTYPE|ENTITY)\b", re.IGNORECASE)
 
 PEM_RE = re.compile(
     rb"-----BEGIN CERTIFICATE-----\s+.+?\s+-----END CERTIFICATE-----",
@@ -116,9 +122,57 @@ def _parse_any_certs(data: bytes) -> list[x509.Certificate]:
 
 def _is_safe_http_url(url: str) -> urllib.parse.ParseResult | None:
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme.lower() in ("http", "https") and bool(parsed.hostname):
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        return None
+
+    host = parsed.hostname.strip().lower().rstrip(".")
+    if not host or host in {"localhost", "ip6-localhost", "localhost.localdomain"}:
+        return None
+    if host.endswith(".localhost") or host.endswith(".local"):
+        return None
+
+    ip_candidate = host.split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(ip_candidate)
+    except ValueError:
         return parsed
-    return None
+
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        return None
+    return parsed
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Handler HTTP bloquant les redirections non sûres (schémas, IP privées, downgrade HTTPS->HTTP)."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        resolved_url = urllib.parse.urljoin(req.full_url, newurl)
+        target = _is_safe_http_url(resolved_url)
+        if target is None:
+            raise urllib.error.URLError(
+                f"Redirection HTTP bloquée (URL non autorisée): {resolved_url}"
+            )
+        orig_scheme = urllib.parse.urlparse(req.full_url).scheme.lower()
+        if orig_scheme == "https" and target.scheme.lower() != "https":
+            raise urllib.error.URLError(
+                f"Downgrade HTTPS -> HTTP bloqué lors d'une redirection: {resolved_url}"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, resolved_url)
 
 
 def _fetch_bytes(url: str, timeout: int = 10) -> bytes | None:
@@ -138,7 +192,12 @@ def _fetch_bytes(url: str, timeout: int = 10) -> bytes | None:
             req = urllib.request.Request(
                 candidate, headers={"User-Agent": "ants-2d-doc-parser/1.0"}
             )
-            with urllib.request.urlopen(req, timeout=timeout) as response:
+            if urllib.request.urlopen is not _DEFAULT_URLOPEN:
+                ctx_mgr = urllib.request.urlopen(req, timeout=timeout)
+            else:
+                opener = urllib.request.build_opener(_SafeRedirectHandler())
+                ctx_mgr = opener.open(req, timeout=timeout)
+            with ctx_mgr as response:
                 data = response.read(_MAX_FETCH_BYTES + 1)
                 if len(data) > _MAX_FETCH_BYTES:
                     logger.warning(
@@ -157,6 +216,13 @@ def _extract_links(html: bytes, base_url: str) -> list[str]:
     """Récupère les liens HTTP/HTTPS .cer/.crt/.der/.pem depuis une page HTML."""
     urls: list[str] = []
     for m in HREF_RE.finditer(html):
+        if len(urls) >= _MAX_LINKS_PER_PAGE:
+            logger.warning(
+                "Nombre maximal de liens par page atteint (%d) pour %s",
+                _MAX_LINKS_PER_PAGE,
+                base_url,
+            )
+            break
         href = unescape(m.group(1).decode("utf-8", "ignore"))
         href = urllib.parse.urljoin(base_url, href)
         if _is_safe_http_url(href) is None:
@@ -188,24 +254,17 @@ def _read_source_bytes(source: str | bytes | Path | IO[str] | IO[bytes]) -> byte
     if isinstance(source, Path):
         return source.read_bytes()
     if isinstance(source, str):
-        path = Path(source)
-        if path.exists():
-            return path.read_bytes()
+        if source.lstrip().startswith("<"):
+            return source.encode("utf-8")
+        try:
+            path = Path(source)
+            if path.is_file():
+                return path.read_bytes()
+        except OSError:
+            pass
         return source.encode("utf-8")
     data = source.read()
     return data.encode("utf-8") if isinstance(data, str) else data
-
-
-def _parse_iso_dt(raw: str | None) -> dt.datetime | None:
-    if not raw:
-        return None
-    txt = raw.strip()
-    if not txt:
-        return None
-    try:
-        return dt.datetime.fromisoformat(txt.replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 def _parse_tsl_bytes(
@@ -242,12 +301,12 @@ def _parse_tsl_bytes(
     if seq_txt.strip().isdigit():
         seq_num = int(seq_txt.strip())
 
-    issue_dt = _parse_iso_dt(
+    issue_dt = _parse_iso_datetime(
         root.findtext(
             "./tsl:SchemeInformation/tsl:ListIssueDateTime", default="", namespaces=NS
         )
     )
-    next_upd = _parse_iso_dt(
+    next_upd = _parse_iso_datetime(
         root.findtext(
             "./tsl:SchemeInformation/tsl:NextUpdate/tsl:dateTime",
             default="",
@@ -293,7 +352,7 @@ def _parse_tsl_bytes(
             if svc_status != SVCSTATUS_INACCORD:
                 continue
 
-            status_start = _parse_iso_dt(
+            status_start = _parse_iso_datetime(
                 svc.findtext(
                     "./tsl:ServiceInformation/tsl:StatusStartingTime",
                     default="",
@@ -379,6 +438,7 @@ class KeyResolver:
 
     Aucun fallback silencieux n'est autorisé : ``(ca_id, cert_id)`` doit correspondre
     à un certificat feuille validé cryptographiquement contre son AC de la TSL.
+    Supporte la coexistence de plusieurs certificats (rotation) pour un même ``(ca_id, cert_id)``.
     """
 
     def __init__(
@@ -388,18 +448,49 @@ class KeyResolver:
         crls_by_ca: Mapping[str, Sequence[x509.CertificateRevocationList]]
         | None = None,
         tsl_metadata: TslMetadata | None = None,
+        leaf_candidates: Mapping[tuple[str, str], Sequence[x509.Certificate]]
+        | None = None,
     ) -> None:
         self._ca_records: dict[str, list[_CertRecord]] = {
             ca.upper(): list(recs) for ca, recs in (ca_records or {}).items()
         }
-        self._leaf_index: dict[tuple[str, str], x509.Certificate] = {
-            (ca.upper(), cid.upper()): cert
-            for (ca, cid), cert in (leaf_index or {}).items()
-        }
+        self._leaf_candidates: dict[tuple[str, str], list[x509.Certificate]] = {}
+        self._leaf_index: dict[tuple[str, str], x509.Certificate] = {}
+
+        if leaf_candidates:
+            for (ca, cid), certs in leaf_candidates.items():
+                key = (ca.upper(), cid.upper())
+                self._merge_leaf_candidates(key, certs)
+
+        if leaf_index:
+            for (ca, cid), cert in leaf_index.items():
+                key = (ca.upper(), cid.upper())
+                self._merge_leaf_candidates(key, [cert])
+
         self._crls_by_ca: dict[str, list[x509.CertificateRevocationList]] = {
             ca.upper(): list(crls) for ca, crls in (crls_by_ca or {}).items()
         }
         self._tsl_metadata = tsl_metadata
+
+    def _merge_leaf_candidates(
+        self, key: tuple[str, str], certs: Sequence[x509.Certificate]
+    ) -> None:
+        bucket = self._leaf_candidates.setdefault(key, [])
+        seen_serials = {c.serial_number for c in bucket}
+        for cert in certs:
+            if cert.serial_number not in seen_serials:
+                bucket.append(cert)
+                seen_serials.add(cert.serial_number)
+        if bucket:
+            bucket.sort(
+                key=lambda c: (
+                    c.not_valid_after_utc,
+                    c.not_valid_before_utc,
+                    c.serial_number,
+                ),
+                reverse=True,
+            )
+            self._leaf_index[key] = bucket[0]
 
     @property
     def tsl_sequence_number(self) -> int | None:
@@ -468,21 +559,21 @@ class KeyResolver:
         )
 
     def add_leaf(self, ca_id: str, leaf_cert: x509.Certificate) -> str:
-        """Valide puis indexe un certificat feuille pour une AC présente dans la TSL."""
+        """Valide puis indexe un certificat feuille (rotation supportée) pour une AC de la TSL."""
         ca = ca_id.upper()
         _, cert_id = self._match_ca_for_leaf(ca, leaf_cert)
-        existing = self._leaf_index.get((ca, cert_id))
-        if existing is not None and existing.serial_number != leaf_cert.serial_number:
-            logger.warning(
-                "Collision d'indexation sur (%s, %s): certificat série %s vs %s",
+        key = (ca, cert_id)
+        existing = self._leaf_candidates.get(key, [])
+        if any(c.serial_number == leaf_cert.serial_number for c in existing):
+            return cert_id
+        if existing:
+            logger.info(
+                "Rotation / certificat supplémentaire indexé pour (%s, %s): série %s",
                 ca,
                 cert_id,
-                existing.serial_number,
                 leaf_cert.serial_number,
             )
-            if existing.not_valid_after_utc > leaf_cert.not_valid_after_utc:
-                return cert_id
-        self._leaf_index[(ca, cert_id)] = leaf_cert
+        self._merge_leaf_candidates(key, [leaf_cert])
         return cert_id
 
     def add_crl(self, ca_id: str, crl: x509.CertificateRevocationList) -> None:
@@ -597,6 +688,7 @@ class KeyResolver:
         store_dir: Path | Traversable | None = None,
         *,
         root_ca_cert: x509.Certificate | None = None,
+        require_crls: bool = True,
     ) -> KeyResolver:
         """Charge le snapshot de confiance complet hors-ligne (TSL + feuilles + CRLs)."""
         resolved_dir: Path | Traversable
@@ -736,6 +828,16 @@ class KeyResolver:
                     ) from exc
                 resolver.add_crl(ca_id, crl)
 
+        if require_crls:
+            active_cas = {ca_id for (ca_id, _) in resolver._leaf_index}
+            missing_crls = sorted(
+                ca_id for ca_id in active_cas if not resolver._crls_by_ca.get(ca_id)
+            )
+            if missing_crls:
+                raise ResolverUnavailableError(
+                    f"CRL(s) manquante(s) dans le magasin de confiance pour: {', '.join(missing_crls)}"
+                )
+
         return resolver
 
     @classmethod
@@ -764,8 +866,8 @@ class KeyResolver:
 
         # Téléchargement et validation des CRLs depuis les CDPs des feuilles validées
         leaves_by_ca: dict[str, list[x509.Certificate]] = {}
-        for (ca_id, _), leaf_cert in resolver._leaf_index.items():
-            leaves_by_ca.setdefault(ca_id, []).append(leaf_cert)
+        for (ca_id, _), candidates in resolver._leaf_candidates.items():
+            leaves_by_ca.setdefault(ca_id, []).extend(candidates)
 
         for ca_id, ca_leaves in leaves_by_ca.items():
             for crl_url in extract_crl_urls_from_certs(ca_leaves):
@@ -804,21 +906,26 @@ class KeyResolver:
         self._match_ca_for_leaf(ca, leaf_cert, expected_cert_id=cid)
         return leaf_cert.public_key()
 
-    def resolve_for_verification(
+    def resolve_candidates_for_verification(
         self,
         ca_id: str,
         cert_id: str,
         *,
         reference_date: dt.date | None,
-        evaluation_date: dt.date,
+        evaluation_date: dt.date | None = None,
         tsl_eval_date: dt.date | None = None,
         strict_tsl_freshness: bool = True,
-    ) -> VerifiedCertificateContext:
-        """Exécute la chaîne complète de résolution et validation PKI pour un 2D-DOC."""
-        freshness = self.get_tsl_freshness(evaluation_date=tsl_eval_date)
-        if strict_tsl_freshness and freshness == TrustListFreshness.STALE:
+    ) -> list[VerifiedCertificateContext]:
+        """Résout tous les certificats candidats valides et non révoqués pour ``(ca_id, cert_id)``."""
+        effective_eval_date = evaluation_date or dt.datetime.now(dt.timezone.utc).date()
+        effective_tsl_eval = (
+            tsl_eval_date if tsl_eval_date is not None else evaluation_date
+        )
+
+        freshness = self.get_tsl_freshness(evaluation_date=effective_tsl_eval)
+        if strict_tsl_freshness and freshness != TrustListFreshness.FRESH:
             raise TrustListExpiredError(
-                f"TSL périmée (NextUpdate={self.tsl_next_update})."
+                f"TSL périmée ou sans date NextUpdate valide (freshness={freshness.value}, NextUpdate={self.tsl_next_update})."
             )
 
         ca = ca_id.upper()
@@ -827,37 +934,92 @@ class KeyResolver:
         if ca not in self._ca_records:
             raise UnknownCAError(f"AC inconnue dans la TSL: {ca_id}")
 
-        leaf_cert = self._leaf_index.get((ca, cid))
-        if leaf_cert is None:
-            raise UnknownCertificateError(
-                f"Certificat introuvable pour AC={ca_id} cert_id={cert_id}"
+        candidates = self._leaf_candidates.get((ca, cid))
+        if not candidates:
+            fallback_single = self._leaf_index.get((ca, cid))
+            if fallback_single is not None:
+                candidates = [fallback_single]
+            else:
+                raise UnknownCertificateError(
+                    f"Certificat introuvable pour AC={ca_id} cert_id={cert_id}"
+                )
+
+        valid_contexts: list[VerifiedCertificateContext] = []
+        validity_err: CertificateValidityError | None = None
+        revoked_err: CertificateRevokedError | None = None
+        untrusted_err: UntrustedCertificateError | None = None
+
+        ca_crls = self._crls_by_ca.get(ca, ())
+        for leaf_cert in candidates:
+            try:
+                matched_ca, _ = self._match_ca_for_leaf(
+                    ca, leaf_cert, expected_cert_id=cid
+                )
+            except UntrustedCertificateError as exc:
+                untrusted_err = untrusted_err or exc
+                continue
+
+            try:
+                check_certificate_revocation(leaf_cert, ca_crls, reference_date)
+            except CertificateRevokedError as exc:
+                revoked_err = revoked_err or exc
+                continue
+
+            try:
+                validate_certificate_dates(
+                    leaf_cert,
+                    matched_ca.cert,
+                    reference_date=reference_date,
+                    evaluation_date=effective_eval_date,
+                    ca_status_start=matched_ca.status_start,
+                )
+            except CertificateValidityError as exc:
+                validity_err = validity_err or exc
+                continue
+
+            valid_contexts.append(
+                VerifiedCertificateContext(
+                    ca_id=ca,
+                    cert_id=cid,
+                    leaf_cert=leaf_cert,
+                    ca_cert=matched_ca.cert,
+                    tsl_sequence_number=self.tsl_sequence_number,
+                    tsl_next_update=self.tsl_next_update,
+                    tsl_freshness=freshness,
+                )
             )
 
-        matched_ca, _ = self._match_ca_for_leaf(ca, leaf_cert, expected_cert_id=cid)
-
-        # Contrôle CRL (révocation)
-        check_certificate_revocation(
-            leaf_cert, self._crls_by_ca.get(ca, ()), reference_date
+        if valid_contexts:
+            return valid_contexts
+        if validity_err is not None:
+            raise validity_err
+        if revoked_err is not None:
+            raise revoked_err
+        if untrusted_err is not None:
+            raise untrusted_err
+        raise UnknownCertificateError(
+            f"Certificat introuvable pour AC={ca_id} cert_id={cert_id}"
         )
 
-        # Contrôle validité temporelle à la date de signature/émission (ou évaluation si FFFF)
-        validate_certificate_dates(
-            leaf_cert,
-            matched_ca.cert,
+    def resolve_for_verification(
+        self,
+        ca_id: str,
+        cert_id: str,
+        *,
+        reference_date: dt.date | None,
+        evaluation_date: dt.date | None = None,
+        tsl_eval_date: dt.date | None = None,
+        strict_tsl_freshness: bool = True,
+    ) -> VerifiedCertificateContext:
+        """Exécute la chaîne complète de résolution et validation PKI pour un 2D-DOC."""
+        return self.resolve_candidates_for_verification(
+            ca_id,
+            cert_id,
             reference_date=reference_date,
             evaluation_date=evaluation_date,
-            ca_status_start=matched_ca.status_start,
-        )
-
-        return VerifiedCertificateContext(
-            ca_id=ca,
-            cert_id=cid,
-            leaf_cert=leaf_cert,
-            ca_cert=matched_ca.cert,
-            tsl_sequence_number=self.tsl_sequence_number,
-            tsl_next_update=self.tsl_next_update,
-            tsl_freshness=freshness,
-        )
+            tsl_eval_date=tsl_eval_date,
+            strict_tsl_freshness=strict_tsl_freshness,
+        )[0]
 
     def available_cert_ids(self, ca_id: str) -> set[str]:
         """Liste les ``cert_id`` validés connus pour une AC."""

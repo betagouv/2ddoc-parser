@@ -168,8 +168,21 @@ class Decoded2DDoc(BaseModel):
             )
 
         try:
+            resolve_candidates_fn = getattr(
+                key_resolver, "resolve_candidates_for_verification", None
+            )
             resolve_fn = getattr(key_resolver, "resolve_for_verification", None)
-            if callable(resolve_fn):
+            if callable(resolve_candidates_fn):
+                contexts = key_resolver.resolve_candidates_for_verification(
+                    self.header.ca_id,
+                    self.header.cert_id,
+                    reference_date=reference_date,
+                    evaluation_date=effective_eval_date,
+                    tsl_eval_date=evaluation_date,
+                    strict_tsl_freshness=strict_tsl_freshness,
+                )
+                pubs = [ctx.leaf_cert.public_key() for ctx in contexts]
+            elif callable(resolve_fn):
                 ctx = key_resolver.resolve_for_verification(
                     self.header.ca_id,
                     self.header.cert_id,
@@ -178,9 +191,9 @@ class Decoded2DDoc(BaseModel):
                     tsl_eval_date=evaluation_date,
                     strict_tsl_freshness=strict_tsl_freshness,
                 )
-                pub = ctx.leaf_cert.public_key()
+                pubs = [ctx.leaf_cert.public_key()]
             else:
-                pub = key_resolver.resolve(self.header.ca_id, self.header.cert_id)
+                pubs = [key_resolver.resolve(self.header.ca_id, self.header.cert_id)]
         except TrustListExpiredError as exc:
             return _finish(VerificationStatus.TRUST_LIST_EXPIRED, str(exc))
         except UnknownCAError as exc:
@@ -196,15 +209,18 @@ class Decoded2DDoc(BaseModel):
         except (ResolverUnavailableError, TrustSignatureError) as exc:
             return _finish(VerificationStatus.RESOLVER_UNAVAILABLE, str(exc))
 
-        try:
-            sig_ok = verify_signature(self.sign_payload, self.signature.raw, pub)
-        except (ValueError, TypeError, TwoDDocSignatureError) as exc:
-            return _finish(VerificationStatus.SIGNATURE_INVALID, str(exc))
+        last_sig_err: Exception | None = None
+        for pub in pubs:
+            try:
+                if verify_signature(self.sign_payload, self.signature.raw, pub):
+                    return _finish(VerificationStatus.VERIFIED)
+            except (ValueError, TypeError, TwoDDocSignatureError) as exc:
+                last_sig_err = exc
 
-        if not sig_ok:
-            return _finish(
-                VerificationStatus.SIGNATURE_INVALID,
-                "La signature cryptographique ne correspond pas aux données.",
-            )
+        if last_sig_err is not None:
+            return _finish(VerificationStatus.SIGNATURE_INVALID, str(last_sig_err))
 
-        return _finish(VerificationStatus.VERIFIED)
+        return _finish(
+            VerificationStatus.SIGNATURE_INVALID,
+            "La signature cryptographique ne correspond pas aux données.",
+        )

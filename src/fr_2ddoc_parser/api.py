@@ -109,7 +109,7 @@ def decode_2d_doc(
 
     if result.status != VerificationStatus.VERIFIED:
         logger.debug(
-            "Vérification 2D-DOC non validée (status=%s, ca=%s, cert=%s): %s",
+            "Vérification 2D-DOC non validée (status=%s, ca=%r, cert=%r): %s",
             result.status.value,
             result.ca_id,
             result.cert_id,
