@@ -1,0 +1,252 @@
+from __future__ import annotations
+
+import argparse
+import logging
+import shutil
+import tempfile
+from pathlib import Path
+
+from cryptography import x509
+from cryptography.hazmat.primitives.serialization import Encoding
+
+from fr_2ddoc_parser.crypto.key_resolver import (
+    DEFAULT_TSL_URL,
+    KeyResolver,
+    _extract_links,
+    _fetch_bytes,
+    _load_crl_bytes,
+    _parse_any_certs,
+    _parse_tsl_bytes,
+    extract_crl_urls_from_certs,
+)
+from fr_2ddoc_parser.crypto.trust_validator import (
+    validate_crl_against_ca,
+    validate_leaf_against_ca,
+    verify_tsl_xml_signature,
+)
+from fr_2ddoc_parser.exception.exceptions import (
+    ResolverUnavailableError,
+    TrustSignatureError,
+    UntrustedCertificateError,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _default_keys_dir() -> Path:
+    return Path(__file__).resolve().parent / "keys"
+
+
+def sync_trust_store(
+    output_dir: Path | None = None,
+    *,
+    tsl_url: str = DEFAULT_TSL_URL,
+    root_ca_path: Path | None = None,
+    timeout: int = 15,
+) -> KeyResolver:
+    """Télécharge, vérifie cryptographiquement et écrit le snapshot de confiance ANTS.
+
+    Aucun fichier cible n'est modifié tant que la TSL, toutes les chaînes
+    AC -> feuille et les CRLs n'ont pas été vérifiées cryptographiquement.
+    """
+    target_dir = (output_dir or _default_keys_dir()).resolve()
+    anchor_path = (root_ca_path or target_dir / "ants_tsl_root_ca.pem").resolve()
+    if not anchor_path.is_file():
+        raise ResolverUnavailableError(f"Ancre ANTS introuvable: {anchor_path}")
+
+    anchor_pem = anchor_path.read_bytes()
+    root_ca_cert = x509.load_pem_x509_certificate(anchor_pem)
+
+    logger.info("Téléchargement de la TSL depuis %s", tsl_url)
+    tsl_bytes = _fetch_bytes(tsl_url, timeout=timeout)
+    if not tsl_bytes:
+        raise ResolverUnavailableError(
+            f"Échec du téléchargement de la TSL depuis {tsl_url}"
+        )
+
+    meta = verify_tsl_xml_signature(tsl_bytes, root_ca_cert)
+    logger.info(
+        "TSL authentifiée (séquence=%s, issue=%s, next_update=%s, signataire=%s)",
+        meta.sequence_number,
+        meta.issue_date,
+        meta.next_update,
+        meta.signer_cn,
+    )
+
+    recs, tsp_uris, _ = _parse_tsl_bytes(tsl_bytes)
+    ca_certs_by_id: dict[str, list[x509.Certificate]] = {}
+    for rec in recs:
+        if rec.ca_id.upper() == "FR00":
+            continue
+        ca_certs_by_id.setdefault(rec.ca_id.upper(), []).append(rec.cert)
+
+    leaves_pem_by_ca: dict[str, bytes] = {}
+    crl_der_by_ca: dict[str, bytes] = {}
+    total_leaves = 0
+
+    for ca_id in sorted(ca_certs_by_id):
+        ca_certs = ca_certs_by_id[ca_id]
+        uris = tsp_uris.get(ca_id, [])
+        raw_certs: list[x509.Certificate] = []
+        for uri in uris:
+            blob = _fetch_bytes(uri, timeout=timeout)
+            if not blob:
+                logger.warning(
+                    "Impossible de récupérer l'annuaire %s pour %s", uri, ca_id
+                )
+                continue
+            raw_certs.extend(_parse_any_certs(blob))
+            if b"<html" in blob.lower():
+                for link in _extract_links(blob, uri):
+                    sub_blob = _fetch_bytes(link, timeout=timeout)
+                    if sub_blob:
+                        raw_certs.extend(_parse_any_certs(sub_blob))
+
+        verified_leaves: dict[int, tuple[str, x509.Certificate]] = {}
+        for cert in raw_certs:
+            if cert.serial_number in verified_leaves:
+                continue
+            for ca_cert in ca_certs:
+                try:
+                    cid = validate_leaf_against_ca(cert, ca_cert)
+                    verified_leaves[cert.serial_number] = (cid, cert)
+                    break
+                except UntrustedCertificateError:
+                    continue
+
+        sorted_leaves = sorted(
+            verified_leaves.values(), key=lambda item: (item[0], item[1].serial_number)
+        )
+        if not sorted_leaves:
+            logger.warning("Aucun certificat feuille vérifié pour l'AC %s", ca_id)
+            continue
+
+        leaves_pem_by_ca[ca_id] = b"".join(
+            cert.public_bytes(Encoding.PEM) for _, cert in sorted_leaves
+        )
+        total_leaves += len(sorted_leaves)
+        logger.info(
+            "AC %s : %d certificat(s) feuille(s) vérifié(s)", ca_id, len(sorted_leaves)
+        )
+
+        # CRLs depuis les CDPs des feuilles vérifiées
+        crl_urls = extract_crl_urls_from_certs([c for _, c in sorted_leaves])
+        for crl_url in crl_urls:
+            crl_bytes = _fetch_bytes(crl_url, timeout=timeout)
+            if not crl_bytes:
+                continue
+            try:
+                crl = _load_crl_bytes(crl_bytes)
+            except Exception as exc:
+                logger.warning("CRL illisible (%s / %s): %s", ca_id, crl_url, exc)
+                continue
+
+            matched_crl = False
+            for ca_cert in ca_certs:
+                try:
+                    validate_crl_against_ca(crl, ca_cert)
+                    crl_der_by_ca[ca_id] = crl.public_bytes(Encoding.DER)
+                    matched_crl = True
+                    logger.info(
+                        "AC %s : CRL vérifiée (%d révocations, %s)",
+                        ca_id,
+                        len(crl),
+                        crl_url,
+                    )
+                    break
+                except TrustSignatureError:
+                    continue
+            if matched_crl:
+                break
+
+    if total_leaves == 0:
+        raise ResolverUnavailableError(
+            "Aucun certificat feuille vérifié téléchargé : abandon de la synchronisation."
+        )
+
+    # Écriture dans un dossier temporaire puis mise à jour propre de target_dir
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp_dir = Path(tmp_str)
+        (tmp_dir / "ants_tsl_root_ca.pem").write_bytes(anchor_pem)
+        (tmp_dir / "tsl_signed.xml").write_bytes(tsl_bytes)
+
+        leaves_tmp = tmp_dir / "trusted_leaves"
+        leaves_tmp.mkdir(parents=True, exist_ok=True)
+        for ca_id, pem_bundle in leaves_pem_by_ca.items():
+            (leaves_tmp / f"{ca_id}.pem").write_bytes(pem_bundle)
+
+        crls_tmp = tmp_dir / "crls"
+        crls_tmp.mkdir(parents=True, exist_ok=True)
+        for ca_id, der_crl in crl_der_by_ca.items():
+            (crls_tmp / f"{ca_id}.crl").write_bytes(der_crl)
+
+        # Validation complète du magasin stagé avant promotion
+        KeyResolver.from_trust_store(tmp_dir)
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "ants_tsl_root_ca.pem").write_bytes(anchor_pem)
+        (target_dir / "tsl_signed.xml").write_bytes(tsl_bytes)
+
+        target_leaves = target_dir / "trusted_leaves"
+        if target_leaves.exists():
+            shutil.rmtree(target_leaves)
+        shutil.copytree(leaves_tmp, target_leaves)
+
+        target_crls = target_dir / "crls"
+        if target_crls.exists():
+            shutil.rmtree(target_crls)
+        shutil.copytree(crls_tmp, target_crls)
+
+    logger.info(
+        "Magasin de confiance mis à jour dans %s (%d feuilles, %d CRLs)",
+        target_dir,
+        total_leaves,
+        len(crl_der_by_ca),
+    )
+    return KeyResolver.from_trust_store(target_dir)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Synchronise et vérifie le snapshot de confiance ANTS 2D-Doc."
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=_default_keys_dir(),
+        help="Répertoire cible du magasin de confiance.",
+    )
+    parser.add_argument(
+        "--tsl-url",
+        default=DEFAULT_TSL_URL,
+        help="URL de la TSL signée ANTS.",
+    )
+    parser.add_argument(
+        "--root-ca",
+        type=Path,
+        default=None,
+        help="Chemin vers le certificat PEM de l'ancre ANTS.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=15,
+        help="Timeout réseau par requête en secondes.",
+    )
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    sync_trust_store(
+        output_dir=args.output_dir,
+        tsl_url=args.tsl_url,
+        root_ca_path=args.root_ca,
+        timeout=args.timeout,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

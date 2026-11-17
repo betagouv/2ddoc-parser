@@ -96,9 +96,11 @@ result.typed.revenue_fiscal_de_reference  # 30000
 result.typed.adresse.full  # "123 RUE DE PARIS, 75001 PARIS"
 ```
 
-#### 5. **is_valid** : Validité de la signature
+#### 5. **is_valid** & **verification** : État détaillé de vérification PKI
 ```python
-result.is_valid  # True/False - Signature cryptographique vérifiée
+result.is_valid  # True uniquement si verification.status == VerificationStatus.VERIFIED
+result.verification.status  # VerificationStatus (verified, signature_invalid, unknown_ca, unknown_cert, untrusted_certificate, cert_revoked, cert_not_valid_at_signing, trust_list_expired, resolver_unavailable, signature_missing)
+result.verification.tsl_freshness  # TrustListFreshness (fresh, stale, unknown)
 ```
 
 ### Exemple complet : Avis d'impôts (type 28)
@@ -186,72 +188,53 @@ Cette bibliothèque supporte les versions **2, 3 et 4** du format 2D-DOC.
 
 Pour ajouter de nouveaux types de documents, consultez le [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 🔐 Vérification cryptographique
+## 🔐 Vérification cryptographique & PKI
 
-La bibliothèque vérifie automatiquement la signature ECDSA du 2D-DOC en utilisant :
-- La **TSL (Trusted Service List)** ANTS embarquée dans le package
-- L'algorithme détecté automatiquement (P-256, P-384 ou P-521)
-- Le certificat correspondant au CA ID et Cert ID du header
+La bibliothèque vérifie automatiquement la signature (ECDSA P-256/P-384/P-521 ou RSA) et la **chaîne de confiance PKI complète** du 2D-DOC en mode **100 % hors-ligne** (aucun appel réseau à l'import ni au runtime) :
+- Vérification XML-DSig de la **TSL ANTS** (`tsl_signed.xml`) ancrée sur `ants_tsl_root_ca.pem` et contrôle de fraîcheur (`NextUpdate`, fail-closed par défaut)
+- Vérification cryptographique de la chaîne **AC TSL → Certificat Feuille** (`BasicConstraints`, `KeyUsage`, `AKI/SKI`, `CN` exact sur 4 caractères, sans fallback silencieux)
+- Vérification des **CRL signées** par chaque AC et contrôle de la **validité temporelle à la date de signature** (`header.signature_date` ou `header.issue_date`)
 
-La vérification se fait automatiquement lors de l'appel à `decode_2d_doc()`.
+Pour l'architecture détaillée et la matrice des états, consultez [docs/PKI_TRUST_ARCHITECTURE.md](docs/PKI_TRUST_ARCHITECTURE.md).
 
-### Résolution automatique des certificats
-
-Le `KeyResolver` charge automatiquement les certificats publics depuis le fichier **`tsl_signed.xml`** embarqué dans le package. Ce fichier contient la liste de confiance (Trusted Service List) ANTS au format ETSI TS 102 231.
-
-**Processus de résolution :**
-
-1. **Chargement de la TSL** : Au démarrage, le fichier `tsl_signed.xml` est parsé pour extraire tous les certificats X.509 des autorités de certification (CA) ANTS.
-
-2. **Indexation intelligente** : Pour chaque certificat, plusieurs identifiants candidats sont générés :
-   - 4/6/8 derniers caractères hexadécimaux du **numéro de série** du certificat
-   - 4/6/8 derniers caractères hexadécimaux du **SKI** (Subject Key Identifier)
-   - 4/6 premiers caractères de l'empreinte **SHA-1** de la clé publique (SPKI)
-
-3. **Résolution lors du décodage** : Lors de la vérification, le `KeyResolver` :
-   - Récupère le **CA ID** (ex: "FR06") et le **Cert ID** (ex: "FPE6") depuis le header DC04
-   - Recherche le certificat correspondant dans l'index
-   - Si un seul certificat existe pour ce CA, il est utilisé automatiquement (fallback)
-   - Extrait la clé publique du certificat pour vérifier la signature ECDSA
-
-**Exemple de résolution :**
+**Exemple de résolution & rafraîchissement explicite du magasin de confiance :**
 ```python
-from fr_2ddoc_parser.crypto.key_resolver import local_key_resolver
+from fr_2ddoc_parser.crypto.key_resolver import get_default_key_resolver
 
-# Résoudre une clé publique manuellement
-public_key = local_key_resolver.resolve(ca_id="FR06", cert_id="FPE6")
-
-# Lister les cert_id disponibles pour un CA donné
-cert_ids = local_key_resolver.available_cert_ids("FR06")
-print(f"Certificats disponibles pour FR06 : {cert_ids}")
-# Exemple : {'FPE6', '1442', '569A', ...}
+resolver = get_default_key_resolver()
+public_key = resolver.resolve(ca_id="FR06", cert_id="FPE2")
+cert_ids = resolver.available_cert_ids("FR06")
 ```
 
-Cette approche permet une résolution robuste même si le `cert_id` dans le 2D-DOC utilise différentes stratégies d'identification (serial, SKI, ou empreinte).
+```bash
+# Actualisation manuelle et vérifiée du snapshot embarqué (hors runtime)
+uv run python -m fr_2ddoc_parser.crypto.sync_trust_store
+```
 
 ## 🏗️ Architecture
 
 ```
 fr_2ddoc_parser/
-├── api.py              # Point d'entrée principal (decode_2d_doc)
+├── api.py                   # Point d'entrée principal (decode_2d_doc)
 ├── parser/
-│   ├── parser.py       # Parsing de la structure DC04
-│   ├── spec.py         # Spécifications du format
-│   └── helper.py       # Fonctions d'aide (conversions)
+│   ├── parser.py            # Parsing de la structure DC02/DC03/DC04
+│   ├── spec.py              # Spécifications du format
+│   └── helper.py            # Fonctions d'aide (conversions)
 ├── crypto/
-│   ├── crypto.py       # Vérification de signature ECDSA
-│   ├── key_resolver.py # Résolution des clés depuis la TSL
-│   └── keys/
-│       └── tsl_signed.xml  # TSL ANTS embarquée
+│   ├── crypto.py            # Vérification de signature ECDSA / RSA
+│   ├── trust_validator.py   # Validation XML-DSig TSL, X.509 AC->Feuille, CRL & dates
+│   ├── key_resolver.py      # Résolution PKI stricte et magasin hors-ligne
+│   ├── sync_trust_store.py  # Utilitaire CLI d'actualisation vérifiée du snapshot
+│   └── keys/                # Snapshot de confiance embarqué (TSL, ancre ANTS, feuilles, CRLs)
 ├── type/
-│   ├── base.py         # GenericDoc (fallback)
-│   └── doc28_avis_impots.py  # Avis d'impôts (type 28)
+│   ├── base.py              # GenericDoc (fallback)
+│   └── doc28_avis_impots.py # Avis d'impôts (type 28)
 ├── model/
-│   └── models.py       # Modèles de données (Decoded2DDoc, Header, etc.)
+│   └── models.py            # Modèles de données (Decoded2DDoc, VerificationResult, etc.)
 ├── registry/
-│   └── registry.py     # Registre des handlers de types
+│   └── registry.py          # Registre des handlers de types
 └── exception/
-    └── exceptions.py   # Exceptions personnalisées
+    └── exceptions.py        # Exceptions typées (format, signature, confiance PKI)
 ```
 
 ## 🧪 Tests
