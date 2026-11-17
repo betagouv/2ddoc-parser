@@ -14,6 +14,9 @@ dependencies = [
     "pydantic>=2.12.4",
 ]
 
+[project.scripts]
+2ddoc-refresh-keys = "fr_2ddoc_parser.crypto.key_resolver:main"
+
 [dependency-groups]
 dev = [
     "ruff>=0.12.11",

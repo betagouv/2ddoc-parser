@@ -4,7 +4,7 @@ import importlib
 import pkgutil
 
 import fr_2ddoc_parser.type as _types_pkg
-from fr_2ddoc_parser.crypto.key_resolver import local_key_resolver
+from fr_2ddoc_parser.crypto.key_resolver import KeyResolver, local_key_resolver
 from fr_2ddoc_parser.model.models import Decoded2DDoc
 from fr_2ddoc_parser.parser.parser import parse
 from fr_2ddoc_parser.registry.registry import TypeHandler, get_handler
@@ -27,7 +27,7 @@ def _ensure_handlers_loaded():
     _handlers_loaded = True
 
 
-def decode_2d_doc(data: str) -> Decoded2DDoc:
+def decode_2d_doc(data: str, key_resolver: KeyResolver | None = None) -> Decoded2DDoc:
     """Decode un 2D-DOC DC04 depuis une chaîne lue (DataMatrix).
 
     Retourne un objet Decoded2DDoc avec :
@@ -35,6 +35,9 @@ def decode_2d_doc(data: str) -> Decoded2DDoc:
       - fields (dict id->valeur)
       - signature (bloc avec Base32 + bytes)
       - typed (si un handler de type est enregistré)
+
+    `key_resolver` permet d'injecter une stratégie de résolution de clés
+    (cache local, réseau, etc.). Par défaut, `local_key_resolver` est utilisé.
     """
     parsed_data = parse(data)
     _ensure_handlers_loaded()
@@ -54,7 +57,7 @@ def decode_2d_doc(data: str) -> Decoded2DDoc:
             fields=parsed_data.fields,
         )
     try:
-        parsed_data.verify(key_resolver=local_key_resolver)
+        parsed_data.verify(key_resolver=key_resolver or local_key_resolver)
     except Exception as e:
         print(f"Warning: signature verification failed: {e}")
     return parsed_data

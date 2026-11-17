@@ -197,18 +197,22 @@ La vérification se fait automatiquement lors de l'appel à `decode_2d_doc()`.
 
 ### Résolution automatique des certificats
 
-Le `KeyResolver` charge automatiquement les certificats publics depuis le fichier **`tsl_signed.xml`** embarqué dans le package. Ce fichier contient la liste de confiance (Trusted Service List) ANTS au format ETSI TS 102 231.
+Le `KeyResolver` charge les certificats publics depuis le fichier **`tsl_signed.xml`** embarqué dans le package. Ce fichier contient la liste de confiance (Trusted Service List) ANTS au format ETSI TS 102 231.
+
+**Aucune I/O réseau n'est effectuée à l'import.** Le fichier TSL local est parsé, puis les certificats feuilles sont chargés depuis le cache local s'il existe (voir la section suivante). Sans cache configuré, les feuilles du CA concerné sont téléchargées paresseusement au premier `resolve()` : `.is_valid` continue donc de fonctionner sans configuration particulière.
 
 **Processus de résolution :**
 
-1. **Chargement de la TSL** : Au démarrage, le fichier `tsl_signed.xml` est parsé pour extraire tous les certificats X.509 des autorités de certification (CA) ANTS.
+1. **Chargement de la TSL** : à l'import, le fichier `tsl_signed.xml` est parsé pour extraire les certificats X.509 des autorités de certification (CA) ANTS.
 
 2. **Indexation intelligente** : Pour chaque certificat, plusieurs identifiants candidats sont générés :
    - 4/6/8 derniers caractères hexadécimaux du **numéro de série** du certificat
    - 4/6/8 derniers caractères hexadécimaux du **SKI** (Subject Key Identifier)
    - 4/6 premiers caractères de l'empreinte **SHA-1** de la clé publique (SPKI)
 
-3. **Résolution lors du décodage** : Lors de la vérification, le `KeyResolver` :
+3. **Chargement des feuilles** : les certificats feuilles publiés par les annuaires des CA (`TSPInformationURI`) sont lus depuis le cache local (`FR_2DDOC_KEY_CACHE`). Si aucun cache n'est configuré, seul le CA demandé est téléchargé au premier `resolve()`.
+
+4. **Résolution lors du décodage** : Lors de la vérification, le `KeyResolver` :
    - Récupère le **CA ID** (ex: "FR06") et le **Cert ID** (ex: "FPE6") depuis le header DC04
    - Recherche le certificat correspondant dans l'index
    - Si un seul certificat existe pour ce CA, il est utilisé automatiquement (fallback)
@@ -228,6 +232,41 @@ print(f"Certificats disponibles pour FR06 : {cert_ids}")
 ```
 
 Cette approche permet une résolution robuste même si le `cert_id` dans le 2D-DOC utilise différentes stratégies d'identification (serial, SKI, ou empreinte).
+
+Au niveau bas niveau, `KeyResolver.from_tsl()` télécharge les feuilles par défaut (`fetch_leaves=True`). Pour construire un resolver sans aucun accès réseau, utiliser `KeyResolver.from_tsl(..., fetch_leaves=False)` ou `load_key_resolver()`.
+
+### Cache local des certificats feuilles (Docker / offline)
+
+Pour utiliser la bibliothèque sans accès réseau au runtime, téléchargez les feuilles pendant le build de l'image, puis pointez `FR_2DDOC_KEY_CACHE` vers ce répertoire :
+
+```dockerfile
+RUN python -c "import fr_2ddoc_parser; fr_2ddoc_parser.refresh_keys('/opt/2ddoc-keys')"
+ENV FR_2DDOC_KEY_CACHE=/opt/2ddoc-keys
+```
+
+Le cache contient un fichier PEM par CA (`FR01.pem`, `FR06.pem`, ...). `refresh_keys()` retourne le nombre de certificats téléchargés. Une fois `FR_2DDOC_KEY_CACHE` défini, le resolver ne fait aucun appel réseau : il utilise uniquement les fichiers présents dans l'image.
+
+En développement, on peut aussi télécharger à la demande :
+
+```python
+from fr_2ddoc_parser.crypto.key_resolver import load_key_resolver
+
+# Télécharge les feuilles de tous les CA immédiatement
+resolver = load_key_resolver(fetch_leaves=True, cache_dir="/opt/2ddoc-keys")
+
+# Ou télécharge uniquement le CA concerné au premier resolve()
+resolver = load_key_resolver(lazy_leaves=True)
+```
+
+Il est également possible d'injecter un resolver dans `decode_2d_doc` :
+
+```python
+from fr_2ddoc_parser.api import decode_2d_doc
+from fr_2ddoc_parser.crypto.key_resolver import load_key_resolver
+
+resolver = load_key_resolver(cache_dir="/opt/2ddoc-keys")
+result = decode_2d_doc(data, key_resolver=resolver)
+```
 
 ## 🏗️ Architecture
 

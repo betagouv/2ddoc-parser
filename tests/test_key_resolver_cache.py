@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+from importlib.resources import files
+
+from cryptography.hazmat.primitives.serialization import Encoding
+
+from fr_2ddoc_parser.crypto import key_resolver as kr
+
+
+def _tsl_bytes() -> bytes:
+    return files("fr_2ddoc_parser.crypto.keys").joinpath("tsl_signed.xml").read_bytes()
+
+
+def test_from_tsl_fetches_leaves_by_default(monkeypatch):
+    called: list[str] = []
+
+    def fake_fetch(url, timeout=10):
+        called.append(url)
+        return None
+
+    monkeypatch.setattr(kr, "_fetch_bytes", fake_fetch)
+    resolver = kr.KeyResolver.from_tsl(_tsl_bytes())
+    assert called
+    assert resolver._per_ca_leaf == {}
+
+
+def test_from_tsl_can_skip_fetching(monkeypatch):
+    def fail(*args, **kwargs):
+        raise AssertionError("network access during from_tsl")
+
+    monkeypatch.setattr(kr, "_fetch_bytes", fail)
+    resolver = kr.KeyResolver.from_tsl(_tsl_bytes(), fetch_leaves=False)
+    assert resolver._per_ca_leaf == {}
+
+
+def test_refresh_writes_cache_and_load_cache_reads_it(tmp_path, monkeypatch):
+    resolver = kr.KeyResolver.from_tsl(_tsl_bytes(), fetch_leaves=False)
+    ca_id = next(iter(resolver._tsp_uris))
+    cert = resolver._per_ca[ca_id][0]
+    pem = cert.public_bytes(Encoding.PEM)
+
+    monkeypatch.setattr(kr, "_fetch_bytes", lambda *args, **kwargs: pem)
+    resolver.refresh_leaves(ca_id, cache_dir=tmp_path)
+
+    cache_file = tmp_path / f"{ca_id}.pem"
+    assert cache_file.is_file()
+
+    def fail(*args, **kwargs):
+        raise AssertionError("network access while loading cache")
+
+    monkeypatch.setattr(kr, "_fetch_bytes", fail)
+    cached = kr.KeyResolver.from_tsl(
+        _tsl_bytes(), fetch_leaves=False, cache_dir=tmp_path
+    )
+    assert ca_id in cached._per_ca_leaf
+    assert cached._per_ca_leaf[ca_id]
+
+
+def test_load_key_resolver_is_lazy_without_cache(monkeypatch):
+    monkeypatch.delenv(kr.CACHE_DIR_ENV, raising=False)
+    resolver = kr.load_key_resolver()
+    ca_id = next(iter(resolver._tsp_uris))
+    called: list[str] = []
+
+    def fake_fetch(url, timeout=10):
+        called.append(url)
+        return None
+
+    monkeypatch.setattr(kr, "_fetch_bytes", fake_fetch)
+
+    try:
+        resolver.resolve(ca_id, "XXXX")
+    except KeyError:
+        pass
+
+    assert called == resolver._tsp_uris[ca_id]
+
+
+def test_load_key_resolver_is_offline_when_cache_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv(kr.CACHE_DIR_ENV, str(tmp_path))
+    resolver = kr.load_key_resolver()
+    assert resolver._lazy_leaves is False
+
+
+def test_lazy_leaves_only_fetch_requested_ca(monkeypatch):
+    resolver = kr.KeyResolver.from_tsl(
+        _tsl_bytes(), fetch_leaves=False, lazy_leaves=True
+    )
+    ca_id = next(iter(resolver._tsp_uris))
+    called: list[str] = []
+
+    def fake_fetch(url, timeout=10):
+        called.append(url)
+        return None
+
+    monkeypatch.setattr(kr, "_fetch_bytes", fake_fetch)
+
+    try:
+        resolver.resolve(ca_id, "XXXX")
+    except KeyError:
+        pass
+
+    assert called == resolver._tsp_uris[ca_id]

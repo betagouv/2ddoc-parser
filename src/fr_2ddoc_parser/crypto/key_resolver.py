@@ -3,13 +3,16 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import hashlib
+import os
 import re
+import threading
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from html import unescape
 from importlib.resources import files
+from pathlib import Path
 from typing import IO, cast
 
 from cryptography import x509
@@ -287,11 +290,21 @@ class KeyResolver:
         per_ca: dict[str, list[x509.Certificate]],
         leaf_index: dict[tuple[str, str], x509.Certificate] | None = None,
         per_ca_leaf: dict[str, list[x509.Certificate]] | None = None,
+        tsp_uris: dict[str, list[str]] | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        lazy_leaves: bool = False,
+        timeout: int = 10,
     ):
         self._index = index_exact  # TSL (souvent AC/intermédiaires)
         self._per_ca = per_ca
         self._leaf_index = leaf_index or {}  # feuilles { (CA, cert_id) -> cert }
         self._per_ca_leaf = per_ca_leaf or {}  # feuilles par CA
+        self._tsp_uris = tsp_uris or {}  # annuaires par CA
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
+        self._lazy_leaves = lazy_leaves
+        self._timeout = timeout
+        self._leaves_loaded: set[str] = set()
+        self._lock = threading.RLock()
 
     @classmethod
     def from_tsl(
@@ -299,6 +312,8 @@ class KeyResolver:
         source: str | bytes | IO[str],
         *,
         fetch_leaves: bool = True,
+        lazy_leaves: bool = False,
+        cache_dir: str | os.PathLike[str] | None = None,
         timeout: int = 10,
     ) -> KeyResolver:
         recs, tsp_uris = _parse_tsl(source)
@@ -317,46 +332,125 @@ class KeyResolver:
             for cid in _derive_cert_ids(r.cert) + _ids_from_subject(r.cert):
                 index_exact[(r.ca_id, cid.upper())] = r.cert
 
-        # Feuilles (annuaire de l'AC via TSPInformationURI)
-        leaf_index: dict[tuple[str, str], x509.Certificate] = {}
-        per_ca_leaf: dict[str, list[x509.Certificate]] = {}
-
-        if fetch_leaves:
-            for ca_id, uris in tsp_uris.items():
-                for uri in uris:
-                    data = _fetch_bytes(uri, timeout=timeout)
-                    if not data:
-                        continue
-                    # 1) tenter des certs directement dans la page
-                    certs = _parse_any_certs(data)
-                    for c in certs:
-                        try:
-                            _index_cert_for_ca(ca_id, c, leaf_index, per_ca_leaf)
-                        except Exception:
-                            pass
-                    # 2) si HTML, suivre les liens .cer/.crt/.der/.pem
-                    if b"<html" in data.lower():
-                        for link in _extract_links(data, uri):
-                            blob = _fetch_bytes(link, timeout=timeout)
-                            if not blob:
-                                continue
-                            for c in _parse_any_certs(blob):
-                                try:
-                                    _index_cert_for_ca(
-                                        ca_id, c, leaf_index, per_ca_leaf
-                                    )
-                                except Exception:
-                                    pass
-
-        return cls(
+        resolver = cls(
             index_exact=index_exact,
             per_ca=per_ca,
-            leaf_index=leaf_index,
-            per_ca_leaf=per_ca_leaf,
+            tsp_uris=tsp_uris,
+            cache_dir=cache_dir,
+            lazy_leaves=lazy_leaves,
+            timeout=timeout,
         )
+
+        # Charge les feuilles déjà présentes dans le cache (aucune I/O réseau).
+        resolver.load_cache()
+
+        # Téléchargement explicite (build Docker, CLI, etc.).
+        if fetch_leaves:
+            resolver.refresh_leaves()
+
+        return resolver
+
+    def _fetch_leaves_for_ca(self, ca_id: str) -> bool:
+        """Télécharge et indexe les feuilles d'un CA. Retourne True si des certs ont été trouvés."""
+        ca = ca_id.upper()
+        new_index: dict[tuple[str, str], x509.Certificate] = {}
+        new_bucket: dict[str, list[x509.Certificate]] = {}
+
+        for uri in self._tsp_uris.get(ca, []):
+            data = _fetch_bytes(uri, timeout=self._timeout)
+            if not data:
+                continue
+            # 1) tenter des certs directement dans la page
+            for c in _parse_any_certs(data):
+                try:
+                    _index_cert_for_ca(ca, c, new_index, new_bucket)
+                except Exception:
+                    pass
+            # 2) si HTML, suivre les liens .cer/.crt/.der/.pem
+            if b"<html" in data.lower():
+                for link in _extract_links(data, uri):
+                    blob = _fetch_bytes(link, timeout=self._timeout)
+                    if not blob:
+                        continue
+                    for c in _parse_any_certs(blob):
+                        try:
+                            _index_cert_for_ca(ca, c, new_index, new_bucket)
+                        except Exception:
+                            pass
+
+        if not new_bucket:
+            return False
+
+        # Remplace les feuilles du CA (évite les doublons au refresh).
+        for key in [k for k in self._leaf_index if k[0] == ca]:
+            del self._leaf_index[key]
+        self._leaf_index.update(new_index)
+        self._per_ca_leaf[ca] = new_bucket.get(ca, [])
+        return True
+
+    def _write_cache_for_ca(self, ca_id: str, cache_dir: Path) -> None:
+        certs = self._per_ca_leaf.get(ca_id.upper(), [])
+        if not certs:
+            return
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / f"{ca_id.upper()}.pem"
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_bytes(b"".join(c.public_bytes(Encoding.PEM) for c in certs))
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def load_cache(self, cache_dir: str | os.PathLike[str] | None = None) -> None:
+        """Charge les feuilles depuis un répertoire de cache, sans réseau."""
+        target = Path(cache_dir) if cache_dir is not None else self._cache_dir
+        if target is None or not target.is_dir():
+            return
+        with self._lock:
+            for path in sorted(target.glob("*.pem")):
+                ca = path.stem.upper()
+                try:
+                    data = path.read_bytes()
+                except OSError:
+                    continue
+                for c in _parse_any_certs(data):
+                    try:
+                        _index_cert_for_ca(ca, c, self._leaf_index, self._per_ca_leaf)
+                    except Exception:
+                        pass
+                self._leaves_loaded.add(ca)
+
+    def refresh_leaves(
+        self,
+        ca_id: str | None = None,
+        *,
+        cache_dir: str | os.PathLike[str] | None = None,
+    ) -> None:
+        """Télécharge les feuilles (tous les CA ou un seul) et met le cache à jour."""
+        target = Path(cache_dir) if cache_dir is not None else self._cache_dir
+        with self._lock:
+            targets = [ca_id.upper()] if ca_id else list(self._tsp_uris)
+            for ca in targets:
+                self._fetch_leaves_for_ca(ca)
+                self._leaves_loaded.add(ca)
+                if target is not None:
+                    self._write_cache_for_ca(ca, target)
+
+    def _ensure_leaves(self, ca_id: str) -> None:
+        ca = ca_id.upper()
+        if ca in self._leaves_loaded or not self._lazy_leaves:
+            return
+        with self._lock:
+            if ca in self._leaves_loaded:
+                return
+            self._fetch_leaves_for_ca(ca)
+            self._leaves_loaded.add(ca)
+            if self._cache_dir is not None:
+                self._write_cache_for_ca(ca, self._cache_dir)
 
     def resolve(self, ca_id: str, cert_id: str):
         """Retourne la *clé publique* pour (CA, cert_id), en préférant une feuille EC si dispo."""
+        self._ensure_leaves(ca_id)
         key = self._leaf_index.get((ca_id.upper(), (cert_id or "").upper()))
         if key is not None:
             return key.public_key()
@@ -399,9 +493,120 @@ class KeyResolver:
             out.update(_derive_cert_ids(c))
         return out
 
+    def leaf_count(self) -> int:
+        """Nombre de certificats feuilles actuellement chargés."""
+        return sum(len(certs) for certs in self._per_ca_leaf.values())
 
-local_key_resolver = KeyResolver.from_tsl(
-    files("fr_2ddoc_parser.crypto.keys").joinpath("tsl_signed.xml").read_bytes(),
-    fetch_leaves=True,
-    timeout=10,
-)
+
+CACHE_DIR_ENV = "FR_2DDOC_KEY_CACHE"
+
+
+def _tsl_bytes() -> bytes:
+    return files("fr_2ddoc_parser.crypto.keys").joinpath("tsl_signed.xml").read_bytes()
+
+
+def _cache_dir_from_env() -> Path | None:
+    value = os.environ.get(CACHE_DIR_ENV)
+    return Path(value) if value else None
+
+
+def load_key_resolver(
+    *,
+    fetch_leaves: bool = False,
+    lazy_leaves: bool | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    timeout: int = 10,
+) -> KeyResolver:
+    """Construit un KeyResolver sans I/O réseau à l'import.
+
+    - cache_dir=None : utilise la variable d'environnement FR_2DDOC_KEY_CACHE.
+    - fetch_leaves=True : télécharge immédiatement les feuilles (build/CLI).
+    - lazy_leaves=None (défaut) : téléchargement paresseux au premier resolve()
+      uniquement si aucun cache n'est configuré. Avec un cache, aucun réseau.
+    - lazy_leaves=True/False : force le comportement.
+    """
+    if cache_dir is None:
+        cache_dir = _cache_dir_from_env()
+    if lazy_leaves is None:
+        lazy_leaves = cache_dir is None
+    return KeyResolver.from_tsl(
+        _tsl_bytes(),
+        fetch_leaves=fetch_leaves,
+        lazy_leaves=lazy_leaves,
+        cache_dir=cache_dir,
+        timeout=timeout,
+    )
+
+
+def refresh_keys(
+    cache_dir: str | os.PathLike[str],
+    *,
+    timeout: int = 10,
+    ca_id: str | None = None,
+) -> int:
+    """Télécharge les feuilles de la TSL dans `cache_dir`.
+
+    Retourne le nombre de certificats feuilles disponibles après le refresh.
+    Utilisable directement en `python -c` dans un Dockerfile.
+    """
+    resolver = KeyResolver.from_tsl(
+        _tsl_bytes(),
+        fetch_leaves=False,
+        cache_dir=cache_dir,
+        timeout=timeout,
+    )
+    resolver.refresh_leaves(ca_id, cache_dir=cache_dir)
+    return resolver.leaf_count()
+
+
+# Aucune requête réseau à l'import : la TSL locale est parsée et le cache
+# éventuel (FR_2DDOC_KEY_CACHE) est chargé. Sans cache, les feuilles du CA
+# concerné sont téléchargées paresseusement au premier resolve().
+local_key_resolver = load_key_resolver()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Télécharge les feuilles de la TSL dans un répertoire de cache.
+
+    Exemple Dockerfile :
+        RUN python -m fr_2ddoc_parser.crypto.key_resolver --cache-dir /opt/2ddoc-keys
+        ENV FR_2DDOC_KEY_CACHE=/opt/2ddoc-keys
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Télécharge les certificats feuilles de la TSL 2D-Doc."
+    )
+    parser.add_argument(
+        "--cache-dir",
+        required=True,
+        help="Répertoire où écrire les certificats (un fichier PEM par CA).",
+    )
+    parser.add_argument("--timeout", type=int, default=10)
+    parser.add_argument(
+        "--ca",
+        action="append",
+        dest="cas",
+        help="Limiter à un CA (ex: FR06). Option répétable.",
+    )
+    args = parser.parse_args(argv)
+
+    resolver = KeyResolver.from_tsl(
+        _tsl_bytes(),
+        fetch_leaves=False,
+        cache_dir=args.cache_dir,
+        timeout=args.timeout,
+    )
+    if args.cas:
+        for ca in args.cas:
+            resolver.refresh_leaves(ca, cache_dir=args.cache_dir)
+    else:
+        resolver.refresh_leaves(cache_dir=args.cache_dir)
+
+    total = resolver.leaf_count()
+    print(f"{total} certificat(s) feuille(s) écrit(s) dans {args.cache_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
