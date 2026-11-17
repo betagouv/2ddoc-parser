@@ -115,7 +115,21 @@ class VerifiedCandidateSet:
     unavailable_detail: str | None = None
 
 
-_CANDIDATE_RESOLUTION_CAPTURE: ContextVar[list[VerifiedCandidateSet | None] | None] = (
+@dataclass
+class _CandidateResolutionCapture:
+    resolver: object
+    request: tuple[
+        str,
+        str,
+        dt.date | None,
+        dt.date | None,
+        dt.date | None,
+        bool,
+    ]
+    result: VerifiedCandidateSet | None = None
+
+
+_CANDIDATE_RESOLUTION_CAPTURE: ContextVar[_CandidateResolutionCapture | None] = (
     ContextVar("candidate_resolution_capture", default=None)
 )
 
@@ -1148,7 +1162,17 @@ class KeyResolver:
             type(self).resolve_candidates_for_verification
             is not KeyResolver.resolve_candidates_for_verification
         ):
-            capture: list[VerifiedCandidateSet | None] = [None]
+            capture = _CandidateResolutionCapture(
+                resolver=self,
+                request=(
+                    ca_id,
+                    cert_id,
+                    reference_date,
+                    evaluation_date,
+                    tsl_eval_date,
+                    strict_tsl_freshness,
+                ),
+            )
             token = _CANDIDATE_RESOLUTION_CAPTURE.set(capture)
             try:
                 contexts = self.resolve_candidates_for_verification(
@@ -1161,7 +1185,7 @@ class KeyResolver:
                 )
             finally:
                 _CANDIDATE_RESOLUTION_CAPTURE.reset(token)
-            captured = capture[0]
+            captured = capture.result
             return VerifiedCandidateSet(
                 contexts=contexts,
                 unavailable_detail=(
@@ -1197,8 +1221,21 @@ class KeyResolver:
             strict_tsl_freshness=strict_tsl_freshness,
         )
         capture = _CANDIDATE_RESOLUTION_CAPTURE.get()
-        if capture is not None:
-            capture[0] = result
+        request = (
+            ca_id,
+            cert_id,
+            reference_date,
+            evaluation_date,
+            tsl_eval_date,
+            strict_tsl_freshness,
+        )
+        if (
+            capture is not None
+            and capture.resolver is self
+            and capture.result is None
+            and capture.request == request
+        ):
+            capture.result = result
         return result.contexts
 
     def resolve_for_verification(

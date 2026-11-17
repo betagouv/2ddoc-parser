@@ -10,6 +10,7 @@ import warnings
 import xml.dom.minidom as minidom
 from http.client import HTTPMessage
 from pathlib import Path
+from typing import Any
 
 import lxml.etree as LET
 import pytest
@@ -2611,3 +2612,63 @@ def test_existing_candidate_resolution_override_is_preserved(synthetic_pki):
     assert decoded.is_valid is False
     assert decoded.verification is not None
     assert decoded.verification.status == VerificationStatus.UNTRUSTED_CERTIFICATE
+
+
+def test_unrelated_legacy_resolution_does_not_contaminate_capture(synthetic_pki):
+    class AuditForward(KeyResolver):
+        other_resolver: KeyResolver | None = None
+
+        def resolve_candidates_for_verification(self, *args, **kwargs):
+            contexts = super().resolve_candidates_for_verification(*args, **kwargs)
+            if self.other_resolver is not None:
+                self.other_resolver.resolve_candidates_for_verification(*args, **kwargs)
+            return contexts
+
+    tsl, _, new_leaf_key, new_leaf_cert, _, new_crl = _build_rotated_issuer_fixture(
+        synthetic_pki
+    )
+    expired_old_crl = _build_crl(
+        synthetic_pki["ca_cert"],
+        synthetic_pki["ca_key"],
+        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
+        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+    )
+
+    def _make_resolver(resolver_class: type[Any], include_old: bool) -> Any:
+        leaves = [new_leaf_cert]
+        if include_old:
+            leaves.insert(0, synthetic_pki["leaf_cert"])
+        return resolver_class.from_tsl(
+            tsl,
+            root_ca_cert=synthetic_pki["ants_root_cert"],
+            leaf_certs_by_ca={"FR06": leaves},
+            crls_by_ca={"FR06": [expired_old_crl, new_crl]},
+        )
+
+    def _decode(resolver, private_key):
+        doc = _build_signed_2ddoc(
+            ca_id="FR06",
+            cert_id="FPE2",
+            issue_date=dt.date(2022, 6, 15),
+            signature_date=dt.date(2022, 6, 15),
+            private_key=private_key,
+        )
+        return decode_2d_doc(
+            doc,
+            key_resolver=resolver,
+            evaluation_date=dt.date(2026, 11, 17),
+        )
+
+    uncertain = _make_resolver(AuditForward, True)
+    uncertain.other_resolver = _make_resolver(KeyResolver, False)
+    unavailable = _decode(uncertain, synthetic_pki["leaf_key"])
+    assert unavailable.verification is not None
+    assert unavailable.verification.status == VerificationStatus.RESOLVER_UNAVAILABLE
+    assert _decode(uncertain, new_leaf_key).is_valid is True
+
+    clear = _make_resolver(AuditForward, False)
+    clear.other_resolver = _make_resolver(KeyResolver, True)
+    invalid = _decode(clear, synthetic_pki["leaf_key"])
+    assert invalid.verification is not None
+    assert invalid.verification.status == VerificationStatus.SIGNATURE_INVALID
+    assert _decode(clear, new_leaf_key).is_valid is True
