@@ -331,6 +331,8 @@ class KeyResolver:
         self._timeout = timeout
         self._leaves_loaded: set[str] = set()
         self._lock = threading.RLock()
+        self._ca_locks: dict[str, threading.Lock] = {}
+        self._ca_locks_lock = threading.Lock()
 
     @classmethod
     def from_tsl(
@@ -376,11 +378,21 @@ class KeyResolver:
 
         return resolver
 
-    def _fetch_leaves_for_ca(self, ca_id: str) -> bool:
-        """Télécharge et indexe les feuilles d'un CA. Retourne True si des certs ont été trouvés."""
+    def _ca_lock(self, ca_id: str) -> threading.Lock:
         ca = ca_id.upper()
-        new_index: dict[tuple[str, str], x509.Certificate] = {}
-        new_bucket: dict[str, list[x509.Certificate]] = {}
+        with self._ca_locks_lock:
+            lock = self._ca_locks.get(ca)
+            if lock is None:
+                lock = threading.Lock()
+                self._ca_locks[ca] = lock
+            return lock
+
+    def _download_leaves_for_ca(
+        self, ca_id: str
+    ) -> tuple[list[x509.Certificate], bool]:
+        """Télécharge les feuilles d'un CA sans verrouiller l'index partagé."""
+        ca = ca_id.upper()
+        certs: list[x509.Certificate] = []
         had_failure = False
 
         for uri in self._tsp_uris.get(ca, []):
@@ -389,11 +401,7 @@ class KeyResolver:
                 had_failure = True
                 continue
             # 1) tenter des certs directement dans la page
-            for c in _parse_any_certs(data):
-                try:
-                    _index_cert_for_ca(ca, c, new_index, new_bucket)
-                except Exception:
-                    pass
+            certs.extend(_parse_any_certs(data))
             # 2) si HTML, suivre les liens .cer/.crt/.der/.pem
             if b"<html" in data.lower():
                 for link in _extract_links(data, uri):
@@ -401,16 +409,22 @@ class KeyResolver:
                     if not blob:
                         had_failure = True
                         continue
-                    for c in _parse_any_certs(blob):
-                        try:
-                            _index_cert_for_ca(ca, c, new_index, new_bucket)
-                        except Exception:
-                            pass
+                    link_certs = _parse_any_certs(blob)
+                    if not link_certs:
+                        had_failure = True
+                        continue
+                    certs.extend(link_certs)
 
-        new_certs = _dedupe_certs(new_bucket.get(ca, []))
-        if not new_certs:
-            return False
+        return _dedupe_certs(certs), had_failure
 
+    def _publish_leaves_for_ca(
+        self,
+        ca_id: str,
+        new_certs: list[x509.Certificate],
+        had_failure: bool,
+    ) -> None:
+        """Met à jour l'index partagé. Doit être appelé avec self._lock."""
+        ca = ca_id.upper()
         # En cas d'échec partiel, conserve les certificats déjà en cache.
         if had_failure:
             merged = _dedupe_certs([*self._per_ca_leaf.get(ca, []), *new_certs])
@@ -421,8 +435,10 @@ class KeyResolver:
             del self._leaf_index[key]
         self._per_ca_leaf[ca] = merged
         for c in merged:
-            _index_cert_ids(ca, c, self._leaf_index)
-        return True
+            try:
+                _index_cert_ids(ca, c, self._leaf_index)
+            except Exception:
+                pass
 
     def _write_cache_for_ca(self, ca_id: str, cache_dir: Path) -> None:
         certs = self._per_ca_leaf.get(ca_id.upper(), [])
@@ -465,25 +481,37 @@ class KeyResolver:
     ) -> None:
         """Télécharge les feuilles (tous les CA ou un seul) et met le cache à jour."""
         target = Path(cache_dir) if cache_dir is not None else self._cache_dir
-        with self._lock:
-            targets = [ca_id.upper()] if ca_id else list(self._tsp_uris)
-            for ca in targets:
-                self._fetch_leaves_for_ca(ca)
-                self._leaves_loaded.add(ca)
-                if target is not None:
-                    self._write_cache_for_ca(ca, target)
+        targets = [ca_id.upper()] if ca_id else list(self._tsp_uris)
+        for ca in targets:
+            with self._ca_lock(ca):
+                new_certs, had_failure = self._download_leaves_for_ca(ca)
+                with self._lock:
+                    if new_certs:
+                        self._publish_leaves_for_ca(ca, new_certs, had_failure)
+                    if self._per_ca_leaf.get(ca):
+                        self._leaves_loaded.add(ca)
+                    if target is not None:
+                        self._write_cache_for_ca(ca, target)
 
     def _ensure_leaves(self, ca_id: str) -> None:
         ca = ca_id.upper()
-        if ca in self._leaves_loaded or not self._lazy_leaves:
+        if not self._lazy_leaves:
             return
         with self._lock:
             if ca in self._leaves_loaded:
                 return
-            self._fetch_leaves_for_ca(ca)
-            self._leaves_loaded.add(ca)
-            if self._cache_dir is not None:
-                self._write_cache_for_ca(ca, self._cache_dir)
+        with self._ca_lock(ca):
+            with self._lock:
+                if ca in self._leaves_loaded:
+                    return
+            new_certs, had_failure = self._download_leaves_for_ca(ca)
+            if not new_certs:
+                return
+            with self._lock:
+                self._publish_leaves_for_ca(ca, new_certs, had_failure)
+                self._leaves_loaded.add(ca)
+                if self._cache_dir is not None:
+                    self._write_cache_for_ca(ca, self._cache_dir)
 
     def resolve(self, ca_id: str, cert_id: str):
         """Retourne la *clé publique* pour (CA, cert_id), en préférant une feuille EC si dispo."""
@@ -587,7 +615,8 @@ def refresh_keys(
     """Télécharge les feuilles de la TSL dans `cache_dir`.
 
     Retourne le nombre de certificats feuilles disponibles après le refresh.
-    Utilisable directement en `python -c` dans un Dockerfile.
+    Lève `RuntimeError` si aucun certificat n'est disponible, afin qu'un
+    `python -c` dans un Dockerfile échoue au lieu de produire une image sans clés.
     """
     resolver = KeyResolver.from_tsl(
         _tsl_bytes(),
@@ -596,6 +625,11 @@ def refresh_keys(
         timeout=timeout,
     )
     resolver.refresh_leaves(ca_id, cache_dir=cache_dir)
+    if ca_id is not None:
+        if resolver.leaf_count(ca_id) == 0:
+            raise RuntimeError(f"Aucun certificat feuille pour {ca_id}")
+    elif resolver.leaf_count() == 0:
+        raise RuntimeError("Aucun certificat feuille téléchargé")
     return resolver.leaf_count()
 
 

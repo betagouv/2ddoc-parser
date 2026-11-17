@@ -244,7 +244,7 @@ RUN python -c "import fr_2ddoc_parser; fr_2ddoc_parser.refresh_keys('/opt/2ddoc-
 ENV FR_2DDOC_KEY_CACHE=/opt/2ddoc-keys
 ```
 
-Le cache contient un fichier PEM par CA (`FR01.pem`, `FR06.pem`, ...). `refresh_keys()` retourne le nombre de certificats téléchargés. Une fois `FR_2DDOC_KEY_CACHE` défini, le resolver ne fait aucun appel réseau : il utilise uniquement les fichiers présents dans l'image.
+Le cache contient un fichier PEM par CA (`FR01.pem`, `FR06.pem`, ...). `refresh_keys()` retourne le nombre de certificats téléchargés et échoue si aucun certificat n'est disponible, ce qui fait échouer le build Docker. Une fois `FR_2DDOC_KEY_CACHE` défini, le resolver ne fait aucun appel réseau : il utilise uniquement les fichiers présents dans l'image.
 
 En développement, on peut aussi télécharger à la demande :
 
