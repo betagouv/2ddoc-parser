@@ -545,6 +545,34 @@ class KeyResolver:
             else TrustListFreshness.FRESH
         )
 
+    def _match_ca_candidates_for_leaf(
+        self,
+        ca_id: str,
+        leaf_cert: x509.Certificate,
+        *,
+        expected_cert_id: str | None = None,
+    ) -> list[tuple[_CertRecord, str]]:
+        ca = ca_id.upper()
+        records = self._ca_records.get(ca)
+        if not records:
+            raise UnknownCAError(f"Autorité de Certification inconnue: {ca_id}")
+
+        matches: list[tuple[_CertRecord, str]] = []
+        last_err: UntrustedCertificateError | None = None
+        for rec in records:
+            try:
+                cid = validate_leaf_against_ca(
+                    leaf_cert, rec.cert, expected_cert_id=expected_cert_id
+                )
+                matches.append((rec, cid))
+            except UntrustedCertificateError as exc:
+                last_err = exc
+        if matches:
+            return matches
+        raise last_err or UntrustedCertificateError(
+            f"Le certificat feuille n'est approuvé par aucune AC pour {ca_id}."
+        )
+
     def _match_ca_for_leaf(
         self,
         ca_id: str,
@@ -552,23 +580,9 @@ class KeyResolver:
         *,
         expected_cert_id: str | None = None,
     ) -> tuple[_CertRecord, str]:
-        ca = ca_id.upper()
-        records = self._ca_records.get(ca)
-        if not records:
-            raise UnknownCAError(f"Autorité de Certification inconnue: {ca_id}")
-
-        last_err: UntrustedCertificateError | None = None
-        for rec in records:
-            try:
-                cid = validate_leaf_against_ca(
-                    leaf_cert, rec.cert, expected_cert_id=expected_cert_id
-                )
-                return rec, cid
-            except UntrustedCertificateError as exc:
-                last_err = exc
-        raise last_err or UntrustedCertificateError(
-            f"Le certificat feuille n'est approuvé par aucune AC pour {ca_id}."
-        )
+        return self._match_ca_candidates_for_leaf(
+            ca_id, leaf_cert, expected_cert_id=expected_cert_id
+        )[0]
 
     def add_leaf(self, ca_id: str, leaf_cert: x509.Certificate) -> str:
         """Valide puis indexe un certificat feuille (rotation supportée) pour une AC de la TSL."""
@@ -599,15 +613,18 @@ class KeyResolver:
             )
 
         last_err: TrustSignatureError | None = None
+        matched_issuers: list[str] = []
         for rec in records:
             try:
                 validate_crl_against_ca(crl, rec.cert)
-                self._crls_by_ca.setdefault(ca, []).append(crl)
-                issuer_key = _cert_fingerprint(rec.cert)
-                self._crls_by_issuer.setdefault(issuer_key, []).append(crl)
-                return
+                matched_issuers.append(_cert_fingerprint(rec.cert))
             except TrustSignatureError as exc:
                 last_err = exc
+        if matched_issuers:
+            self._crls_by_ca.setdefault(ca, []).append(crl)
+            for issuer_key in matched_issuers:
+                self._crls_by_issuer.setdefault(issuer_key, []).append(crl)
+            return
         raise last_err or TrustSignatureError(
             f"CRL invalide ou non signée par l'AC {ca_id}."
         )
@@ -616,8 +633,8 @@ class KeyResolver:
         active: dict[tuple[str, str], x509.Certificate] = {}
         for (ca_id, _), leaves in self._leaf_candidates.items():
             for leaf in leaves:
-                rec, _ = self._match_ca_for_leaf(ca_id, leaf)
-                active[(ca_id, _cert_fingerprint(rec.cert))] = rec.cert
+                for rec, _ in self._match_ca_candidates_for_leaf(ca_id, leaf):
+                    active[(ca_id, _cert_fingerprint(rec.cert))] = rec.cert
         return active
 
     def _ensure_crl_coverage(
@@ -934,6 +951,11 @@ class KeyResolver:
                 )
                 group[2].append(leaf)
 
+        if not issuer_groups:
+            raise ResolverUnavailableError(
+                "Aucun certificat feuille vérifié n'a pu être téléchargé."
+            )
+
         for issuer_key, (ca_id, ca_cert, ca_leaves) in issuer_groups.items():
             for crl_url in extract_crl_urls_from_certs(ca_leaves):
                 crl_bytes = _fetch_bytes(crl_url, timeout=timeout)
@@ -1023,58 +1045,65 @@ class KeyResolver:
         valid_contexts: list[VerifiedCertificateContext] = []
         validity_err: CertificateValidityError | None = None
         revoked_err: CertificateRevokedError | None = None
+        unavailable_err: ResolverUnavailableError | None = None
         untrusted_err: UntrustedCertificateError | None = None
 
         for leaf_cert in candidates:
             try:
-                matched_ca, _ = self._match_ca_for_leaf(
+                matched_cas = self._match_ca_candidates_for_leaf(
                     ca, leaf_cert, expected_cert_id=cid
                 )
             except UntrustedCertificateError as exc:
                 untrusted_err = untrusted_err or exc
                 continue
 
-            try:
-                if self._require_crls:
-                    issuer_crls = self._crls_by_issuer.get(
-                        _cert_fingerprint(matched_ca.cert), ()
-                    )
-                    check_certificate_revocation(
+            for matched_ca, _ in matched_cas:
+                try:
+                    if self._require_crls:
+                        issuer_crls = self._crls_by_issuer.get(
+                            _cert_fingerprint(matched_ca.cert), ()
+                        )
+                        check_certificate_revocation(
+                            leaf_cert,
+                            issuer_crls,
+                            reference_date,
+                            evaluation_date,
+                        )
+                except CertificateRevokedError as exc:
+                    revoked_err = revoked_err or exc
+                    continue
+                except ResolverUnavailableError as exc:
+                    unavailable_err = unavailable_err or exc
+                    continue
+
+                try:
+                    validate_certificate_dates(
                         leaf_cert,
-                        issuer_crls,
-                        reference_date,
-                        evaluation_date,
+                        matched_ca.cert,
+                        reference_date=reference_date,
+                        evaluation_date=effective_eval_date,
+                        ca_status_start=matched_ca.status_start,
                     )
-            except CertificateRevokedError as exc:
-                revoked_err = revoked_err or exc
-                continue
+                except CertificateValidityError as exc:
+                    validity_err = validity_err or exc
+                    continue
 
-            try:
-                validate_certificate_dates(
-                    leaf_cert,
-                    matched_ca.cert,
-                    reference_date=reference_date,
-                    evaluation_date=effective_eval_date,
-                    ca_status_start=matched_ca.status_start,
+                valid_contexts.append(
+                    VerifiedCertificateContext(
+                        ca_id=ca,
+                        cert_id=cid,
+                        leaf_cert=leaf_cert,
+                        ca_cert=matched_ca.cert,
+                        tsl_sequence_number=self.tsl_sequence_number,
+                        tsl_next_update=self.tsl_next_update,
+                        tsl_freshness=freshness,
+                    )
                 )
-            except CertificateValidityError as exc:
-                validity_err = validity_err or exc
-                continue
-
-            valid_contexts.append(
-                VerifiedCertificateContext(
-                    ca_id=ca,
-                    cert_id=cid,
-                    leaf_cert=leaf_cert,
-                    ca_cert=matched_ca.cert,
-                    tsl_sequence_number=self.tsl_sequence_number,
-                    tsl_next_update=self.tsl_next_update,
-                    tsl_freshness=freshness,
-                )
-            )
 
         if valid_contexts:
             return valid_contexts
+        if unavailable_err is not None:
+            raise unavailable_err
         if validity_err is not None:
             raise validity_err
         if revoked_err is not None:

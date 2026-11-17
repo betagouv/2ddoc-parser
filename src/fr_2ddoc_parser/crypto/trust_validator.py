@@ -230,6 +230,7 @@ def _element_text(element: minidom.Element | None) -> str:
 def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> bytes:
     """Canonicalise un sous-arbre avec C14N 1.0 inclusif ou exclusif via libxml2."""
     ns_map: dict[str, str] = {}
+    xml_attributes: dict[str, str] = {}
     cur: minidom.Node | None = node
     while cur is not None and isinstance(cur, minidom.Element):
         if cur.attributes:
@@ -239,6 +240,8 @@ def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> b
                     continue
                 if attr.name.startswith("xmlns:") or attr.name == "xmlns":
                     ns_map.setdefault(attr.name, attr.value)
+                elif not exclusive and attr.name.startswith("xml:"):
+                    xml_attributes.setdefault(attr.name, attr.value)
         cur = cur.parentNode
 
     clone = node.cloneNode(deep=True)
@@ -247,6 +250,9 @@ def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> b
     for ns_attr, ns_value in sorted(ns_map.items()):
         if not clone.hasAttribute(ns_attr):
             clone.setAttribute(ns_attr, ns_value)
+    for attr_name, attr_value in sorted(xml_attributes.items()):
+        if not clone.hasAttribute(attr_name):
+            clone.setAttribute(attr_name, attr_value)
 
     try:
         element = LET.fromstring(clone.toxml().encode("utf-8"))
@@ -304,13 +310,31 @@ def _find_unique_element_by_id(
     return matches[0]
 
 
-def _resolve_reference_c14n_exclusive(
+def _lookup_namespace_uri(node: minidom.Element, prefix: str) -> str | None:
+    attribute_name = f"xmlns:{prefix}" if prefix else "xmlns"
+    cur: minidom.Node | None = node
+    while cur is not None and isinstance(cur, minidom.Element):
+        if cur.hasAttribute(attribute_name):
+            return cur.getAttribute(attribute_name)
+        cur = cur.parentNode
+    return None
+
+
+def _reject_unsupported_c14n_parameters(element: minidom.Element) -> None:
+    if element.getAttribute("Algorithm") != _C14N_EXC:
+        return
+    if _direct_children_ns(element, _C14N_EXC, "InclusiveNamespaces"):
+        raise TrustSignatureError(
+            "Le paramètre Exclusive C14N InclusiveNamespaces/PrefixList n'est pas supporté."
+        )
+
+
+def _resolve_reference_profile(
     ref_el: minidom.Element,
     *,
-    default_exclusive: bool,
     allow_enveloped: bool,
-) -> bool:
-    """Valide les transforms supportées et détermine le mode C14N d'une référence."""
+) -> tuple[bool, bool]:
+    """Valide les transforms et retourne (C14N exclusif, suppression signature)."""
     transforms_els = _direct_children_ns(ref_el, DS_NS, "Transforms")
     if len(transforms_els) > 1:
         raise TrustSignatureError("ds:Transforms multiple dans ds:Reference.")
@@ -320,6 +344,7 @@ def _resolve_reference_c14n_exclusive(
         for transform_el in _direct_children_ns(transforms_el, DS_NS, "Transform"):
             algorithm = transform_el.getAttribute("Algorithm")
             algorithms.append(algorithm)
+            _reject_unsupported_c14n_parameters(transform_el)
             if algorithm == _XMLDSIG_FILTER2:
                 xpath_els = _direct_children_ns(transform_el, _XMLDSIG_FILTER2, "XPath")
                 if (
@@ -327,9 +352,10 @@ def _resolve_reference_c14n_exclusive(
                     or len(xpath_els) != 1
                     or xpath_els[0].getAttribute("Filter") != "subtract"
                     or _element_text(xpath_els[0]) != _ANTS_SUBTRACT_SIGNATURE_XPATH
+                    or _lookup_namespace_uri(xpath_els[0], "ds") != DS_NS
                 ):
                     raise TrustSignatureError(
-                        "Seule la soustraction xmldsig-filter2 de /descendant::ds:Signature est supportée pour URI=''."
+                        "Seule la soustraction xmldsig-filter2 de /descendant::ds:Signature avec le namespace ds correct est supportée pour URI=''."
                     )
 
     allowed = {_ENVELOPED_SIGNATURE, _XMLDSIG_FILTER2, *_ALLOWED_C14N_ALGS}
@@ -352,13 +378,19 @@ def _resolve_reference_c14n_exclusive(
             )
 
     c14n_algorithms = [alg for alg in algorithms if alg in _ALLOWED_C14N_ALGS]
-    if c14n_algorithms and algorithms[-1] != c14n_algorithms[-1]:
+    if len(c14n_algorithms) > 1:
+        raise TrustSignatureError(
+            "Plusieurs transforms C14N dans une même ds:Reference sont interdites."
+        )
+    if c14n_algorithms and algorithms[-1] != c14n_algorithms[0]:
         raise TrustSignatureError(
             "La canonicalisation doit être la dernière transform XML-DSig."
         )
-    if c14n_algorithms:
-        return c14n_algorithms[0] == _C14N_EXC
-    return default_exclusive
+
+    # Sans C14N explicite, XML-DSig convertit le node-set avec C14N 1.0 inclusif.
+    exclusive = bool(c14n_algorithms and c14n_algorithms[0] == _C14N_EXC)
+    remove_signature = any(alg in signature_transforms for alg in algorithms)
+    return exclusive, remove_signature
 
 
 def verify_tsl_xml_signature(
@@ -483,6 +515,7 @@ def verify_tsl_xml_signature(
         raise TrustSignatureError(
             f"Algorithme de canonicalisation TSL non supporté: {c14n_alg!r}"
         )
+    _reject_unsupported_c14n_parameters(c14n_els[0])
     signed_info_exclusive = c14n_alg == _C14N_EXC
 
     sig_method_els = _direct_children_ns(signed_info_el, DS_NS, "SignatureMethod")
@@ -523,9 +556,8 @@ def verify_tsl_xml_signature(
         except Exception as exc:
             raise TrustSignatureError(f"DigestValue base64 invalide: {exc}") from exc
 
-        ref_exclusive = _resolve_reference_c14n_exclusive(
+        ref_exclusive, remove_signature = _resolve_reference_profile(
             ref_el,
-            default_exclusive=signed_info_exclusive,
             allow_enveloped=uri == "",
         )
 
@@ -541,7 +573,7 @@ def verify_tsl_xml_signature(
             doc_root = doc_clone.documentElement
             doc_sigs = doc_root.getElementsByTagNameNS(DS_NS, "Signature")
             for ds_node in list(doc_sigs):
-                if ds_node.parentNode is doc_root:
+                if remove_signature and ds_node.parentNode is doc_root:
                     doc_root.removeChild(ds_node)
             c14n_bytes = _canonicalize_subtree(doc_root, exclusive=ref_exclusive)
         elif uri.startswith("#"):
@@ -685,6 +717,20 @@ def validate_crl_against_ca(
         raise TrustSignatureError(
             "L'émetteur de la CRL ne correspond pas au sujet de l'AC."
         )
+
+    for extension in crl.extensions:
+        if isinstance(extension.value, x509.DeltaCRLIndicator):
+            raise TrustSignatureError(
+                "Les CRLs delta ne sont pas supportées comme preuve complète de non-révocation."
+            )
+        if isinstance(extension.value, x509.IssuingDistributionPoint):
+            raise TrustSignatureError(
+                "Les CRLs avec IssuingDistributionPoint/partitionnement ne sont pas supportées comme preuve complète de non-révocation."
+            )
+        if extension.critical:
+            raise TrustSignatureError(
+                f"Extension critique CRL non supportée: {extension.oid.dotted_string}."
+            )
 
     ca_pub = ca_cert.public_key()
     if not isinstance(

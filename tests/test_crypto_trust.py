@@ -240,6 +240,10 @@ def _build_signed_tsl_xml(
     next_update_dt: dt.datetime,
     signing_dt: dt.datetime | None = None,
     tsp_uris: dict[str, str] | None = None,
+    reference_c14n: str | None = "http://www.w3.org/2001/10/xml-exc-c14n#",
+    signed_properties_c14n: str | None = "http://www.w3.org/2001/10/xml-exc-c14n#",
+    signed_info_c14n: str = "http://www.w3.org/2001/10/xml-exc-c14n#",
+    root_attributes: str = "",
 ) -> bytes:
     tsp_blocks: list[str] = []
     for ca_id, ca_cert, status_start in ca_entries:
@@ -276,7 +280,7 @@ def _build_signed_tsl_xml(
     unsigned_xml = (
         '<tsl:TrustServiceStatusList xmlns:ds="http://www.w3.org/2000/09/xmldsig#" '
         'xmlns:tsl="http://uri.etsi.org/02231/v2#" '
-        'xmlns:xades="http://uri.etsi.org/01903/v1.3.2#">'
+        f'xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"{root_attributes}>'
         "<tsl:SchemeInformation>"
         f"<tsl:TSLSequenceNumber>{sequence_number}</tsl:TSLSequenceNumber>"
         f"<tsl:ListIssueDateTime>{issue_iso}</tsl:ListIssueDateTime>"
@@ -288,8 +292,20 @@ def _build_signed_tsl_xml(
         "</tsl:TrustServiceStatusList>"
     )
 
-    c14n_doc = _independent_c14n(unsigned_xml, exclusive=True)
+    c14n_doc = _independent_c14n(
+        unsigned_xml,
+        exclusive=reference_c14n == "http://www.w3.org/2001/10/xml-exc-c14n#",
+    )
     doc_digest = base64.b64encode(hashlib.sha256(c14n_doc).digest()).decode("ascii")
+    doc_transforms = (
+        '<ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>'
+        + (
+            f'<ds:Transform Algorithm="{reference_c14n}"/>'
+            if reference_c14n is not None
+            else ""
+        )
+        + "</ds:Transforms>"
+    )
 
     signed_props_xml = (
         '<xades:SignedProperties xmlns:ds="http://www.w3.org/2000/09/xmldsig#" '
@@ -299,24 +315,60 @@ def _build_signed_tsl_xml(
         "</xades:SignedSignatureProperties>"
         "</xades:SignedProperties>"
     )
-    c14n_sp = _independent_c14n(signed_props_xml, exclusive=True)
+    signed_props_for_digest = signed_props_xml
+    if signed_properties_c14n != "http://www.w3.org/2001/10/xml-exc-c14n#":
+        ancestor_attributes = (
+            ' xmlns:tsl="http://uri.etsi.org/02231/v2#"' + root_attributes
+        )
+        signed_props_for_digest = signed_props_xml.replace(
+            ">", ancestor_attributes + ">", 1
+        )
+    c14n_sp = _independent_c14n(
+        signed_props_for_digest,
+        exclusive=signed_properties_c14n == "http://www.w3.org/2001/10/xml-exc-c14n#",
+    )
     sp_digest = base64.b64encode(hashlib.sha256(c14n_sp).digest()).decode("ascii")
+    sp_transforms = (
+        "<ds:Transforms>"
+        + (
+            f'<ds:Transform Algorithm="{signed_properties_c14n}"/>'
+            if signed_properties_c14n is not None
+            else ""
+        )
+        + "</ds:Transforms>"
+        if signed_properties_c14n is not None
+        else ""
+    )
 
     signed_info_xml = (
         '<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">'
-        '<ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>'
+        f'<ds:CanonicalizationMethod Algorithm="{signed_info_c14n}"/>'
         '<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>'
         '<ds:Reference URI="">'
+        f"{doc_transforms}"
         '<ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>'
         f"<ds:DigestValue>{doc_digest}</ds:DigestValue>"
         "</ds:Reference>"
         '<ds:Reference URI="#xades-sig-1">'
+        f"{sp_transforms}"
         '<ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>'
         f"<ds:DigestValue>{sp_digest}</ds:DigestValue>"
         "</ds:Reference>"
         "</ds:SignedInfo>"
     )
-    c14n_si = _independent_c14n(signed_info_xml, exclusive=True)
+    signed_info_for_signature = signed_info_xml
+    if signed_info_c14n != "http://www.w3.org/2001/10/xml-exc-c14n#":
+        ancestor_attributes = (
+            ' xmlns:tsl="http://uri.etsi.org/02231/v2#"'
+            ' xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"' + root_attributes
+        )
+        signed_info_for_signature = signed_info_xml.replace(
+            ">", ancestor_attributes + ">", 1
+        )
+    c14n_si = _independent_c14n(
+        signed_info_for_signature,
+        exclusive=signed_info_c14n == "http://www.w3.org/2001/10/xml-exc-c14n#",
+    )
     sig_bytes = signer_key.sign(c14n_si, padding.PKCS1v15(), hashes.SHA256())
     sig_b64 = base64.b64encode(sig_bytes).decode("ascii")
     signer_b64 = base64.b64encode(signer_cert.public_bytes(Encoding.DER)).decode(
@@ -355,6 +407,7 @@ def _build_crl(
     next_update: dt.datetime,
     revoked_entries: list[tuple[int, dt.datetime, x509.ReasonFlags | None]]
     | None = None,
+    extra_extensions: list[x509.Extension] | None = None,
 ) -> x509.CertificateRevocationList:
     builder = (
         x509.CertificateRevocationListBuilder()
@@ -373,6 +426,8 @@ def _build_crl(
                 x509.CRLReason(reason), critical=False
             )
         builder = builder.add_revoked_certificate(rev_builder.build())
+    for extension in extra_extensions or []:
+        builder = builder.add_extension(extension.value, critical=extension.critical)
     return builder.sign(ca_key, hashes.SHA256())
 
 
@@ -2141,10 +2196,236 @@ def test_unsupported_xpath_filter_is_rejected(synthetic_pki):
         b'Filter="subtract">/descendant::ds:KeyInfo</dsig-filter2:XPath>'
         b"</ds:Transform></ds:Transforms>"
     )
+    original_transforms = (
+        b'<ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>'
+        b'<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/></ds:Transforms>'
+    )
     tsl = synthetic_pki["tsl_bytes"].replace(
-        b'<ds:Reference URI=""><ds:DigestMethod',
-        b'<ds:Reference URI="">' + transform + b"<ds:DigestMethod",
+        original_transforms,
+        transform,
         1,
     )
     with pytest.raises(TrustSignatureError, match="xmldsig-filter2"):
         verify_tsl_xml_signature(tsl, synthetic_pki["ants_root_cert"])
+
+
+def _build_fixture_tsl(synthetic_pki, **kwargs) -> bytes:
+    return _build_signed_tsl_xml(
+        ca_entries=[
+            (
+                "FR06",
+                synthetic_pki["ca_cert"],
+                dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+            )
+        ],
+        signer_cert=synthetic_pki["tsl_signer_cert"],
+        signer_key=synthetic_pki["tsl_signer_key"],
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        **kwargs,
+    )
+
+
+def test_delta_restricted_and_unknown_critical_crls_are_rejected(synthetic_pki):
+    idp = x509.IssuingDistributionPoint(
+        full_name=None,
+        relative_name=None,
+        only_contains_user_certs=False,
+        only_contains_ca_certs=True,
+        only_some_reasons=None,
+        indirect_crl=False,
+        only_contains_attribute_certs=False,
+    )
+    unsupported_values = [
+        x509.DeltaCRLIndicator(123),
+        idp,
+        x509.UnrecognizedExtension(x509.ObjectIdentifier("1.2.3.4"), b"\x05\x00"),
+    ]
+    for value in unsupported_values:
+        crl = _build_crl(
+            synthetic_pki["ca_cert"],
+            synthetic_pki["ca_key"],
+            last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+            next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+            extra_extensions=[x509.Extension(value.oid, True, value)],
+        )
+        with pytest.raises(TrustSignatureError):
+            validate_crl_against_ca(crl, synthetic_pki["ca_cert"])
+
+
+def test_unavailable_rotated_candidate_does_not_block_valid_candidate(synthetic_pki):
+    tsl, _, new_leaf_key, new_leaf_cert, _, new_crl = _build_rotated_issuer_fixture(
+        synthetic_pki
+    )
+    expired_old_crl = _build_crl(
+        synthetic_pki["ca_cert"],
+        synthetic_pki["ca_key"],
+        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
+        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+    )
+    resolver = KeyResolver.from_tsl(
+        tsl,
+        root_ca_cert=synthetic_pki["ants_root_cert"],
+        leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"], new_leaf_cert]},
+        crls_by_ca={"FR06": [expired_old_crl, new_crl]},
+    )
+    doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=dt.date(2022, 6, 15),
+        signature_date=dt.date(2022, 6, 15),
+        private_key=new_leaf_key,
+    )
+    decoded = decode_2d_doc(
+        doc,
+        key_resolver=resolver,
+        evaluation_date=dt.date(2026, 11, 17),
+    )
+    assert decoded.is_valid is True
+    assert decoded.verification is not None
+    assert decoded.verification.status == VerificationStatus.VERIFIED
+
+
+def test_same_key_ca_renewal_preserves_historical_verification(synthetic_pki):
+    renewed_ca_cert = _build_ca_cert(
+        "FR06",
+        synthetic_pki["ca_key"],
+        not_before=dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
+        not_after=dt.datetime(2035, 1, 1, tzinfo=dt.timezone.utc),
+    )
+    tsl = _build_signed_tsl_xml(
+        ca_entries=[
+            (
+                "FR06",
+                synthetic_pki["ca_cert"],
+                dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+            ),
+            (
+                "FR06",
+                renewed_ca_cert,
+                dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
+            ),
+        ],
+        signer_cert=synthetic_pki["tsl_signer_cert"],
+        signer_key=synthetic_pki["tsl_signer_key"],
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+    )
+    resolver = KeyResolver.from_tsl(
+        tsl,
+        root_ca_cert=synthetic_pki["ants_root_cert"],
+        leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"]]},
+        crls_by_ca={"FR06": [synthetic_pki["crl"]]},
+    )
+    doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=dt.date(2022, 6, 15),
+        signature_date=dt.date(2022, 6, 15),
+        private_key=synthetic_pki["leaf_key"],
+    )
+    decoded = decode_2d_doc(
+        doc,
+        key_resolver=resolver,
+        evaluation_date=dt.date(2026, 11, 17),
+    )
+    assert decoded.is_valid is True
+    assert decoded.verification is not None
+    assert decoded.verification.status == VerificationStatus.VERIFIED
+
+
+def test_implicit_reference_canonicalization_is_inclusive(synthetic_pki):
+    tsl = _build_fixture_tsl(
+        synthetic_pki,
+        reference_c14n=None,
+        signed_properties_c14n=None,
+    )
+    metadata = verify_tsl_xml_signature(tsl, synthetic_pki["ants_root_cert"])
+    assert metadata.sequence_number == 99
+
+
+def test_inclusive_c14n_inherits_nearest_xml_namespace_attributes():
+    document = minidom.parseString(
+        '<r xml:lang="fr" xml:space="preserve" xml:base="https://example.test/root/" xml:id="root-id"><x xml:lang="en"/></r>'
+    )
+    root = document.documentElement
+    assert root is not None
+    child = root.firstChild
+    assert isinstance(child, minidom.Element)
+    assert _canonicalize_subtree(child, exclusive=False) == (
+        b'<x xml:base="https://example.test/root/" xml:id="root-id" '
+        b'xml:lang="en" xml:space="preserve"></x>'
+    )
+
+
+def test_inclusive_signature_inherits_root_xml_attributes(synthetic_pki):
+    tsl = _build_fixture_tsl(
+        synthetic_pki,
+        reference_c14n="http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+        signed_properties_c14n="http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+        signed_info_c14n="http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+        root_attributes=' xml:lang="fr"',
+    )
+    metadata = verify_tsl_xml_signature(tsl, synthetic_pki["ants_root_cert"])
+    assert metadata.sequence_number == 99
+
+
+def test_exclusive_c14n_prefix_list_is_explicitly_rejected(synthetic_pki):
+    tsl = _build_fixture_tsl(synthetic_pki)
+    prefix_list = (
+        '<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#">'
+        '<ec:InclusiveNamespaces xmlns:ec="http://www.w3.org/2001/10/xml-exc-c14n#" '
+        'PrefixList="tsl"/></ds:Transform>'
+    )
+    tsl = tsl.replace(
+        b'<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>',
+        prefix_list.encode("ascii"),
+        1,
+    )
+    with pytest.raises(TrustSignatureError, match="InclusiveNamespaces"):
+        verify_tsl_xml_signature(tsl, synthetic_pki["ants_root_cert"])
+
+
+def test_filter2_requires_correct_ds_namespace_binding():
+    tsl = Path("src/fr_2ddoc_parser/crypto/keys/tsl_signed.xml").read_bytes()
+    tsl = tsl.replace(
+        b'Filter="subtract">/descendant::ds:Signature',
+        b'Filter="subtract" xmlns:ds="urn:wrong">/descendant::ds:Signature',
+        1,
+    )
+    with pytest.raises(TrustSignatureError, match="xmldsig-filter2"):
+        KeyResolver.from_tsl(tsl)
+
+
+def test_multiple_c14n_transforms_are_rejected(synthetic_pki):
+    tsl = _build_fixture_tsl(synthetic_pki)
+    tsl = tsl.replace(
+        b'<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>',
+        b'<ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>'
+        b'<ds:Transform Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>',
+        1,
+    )
+    with pytest.raises(TrustSignatureError, match="C14N"):
+        verify_tsl_xml_signature(tsl, synthetic_pki["ants_root_cert"])
+
+
+def test_from_network_rejects_when_no_leaf_can_be_downloaded(
+    monkeypatch, synthetic_pki
+):
+    tsl = _build_fixture_tsl(
+        synthetic_pki,
+        tsp_uris={"FR06": "https://ca.example/fr06.der"},
+    )
+    monkeypatch.setattr(
+        key_resolver_mod,
+        "_fetch_bytes",
+        lambda url, timeout=15: (
+            tsl if url == "https://tsl.example/tsl.xml" else b"not a certificate"
+        ),
+    )
+    with pytest.raises(ResolverUnavailableError):
+        KeyResolver.from_network(
+            "https://tsl.example/tsl.xml",
+            root_ca_cert=synthetic_pki["ants_root_cert"],
+            evaluation_date=dt.date(2026, 11, 17),
+        )
