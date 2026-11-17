@@ -82,6 +82,49 @@ def test_load_key_resolver_is_offline_when_cache_configured(tmp_path, monkeypatc
     assert resolver._lazy_leaves is False
 
 
+def test_partial_refresh_preserves_cached_certs(monkeypatch):
+    resolver = kr.KeyResolver.from_tsl(_tsl_bytes(), fetch_leaves=False)
+    ca_id = next(iter(resolver._tsp_uris))
+    uri = resolver._tsp_uris[ca_id][0]
+    old_cert = resolver._per_ca[ca_id][0]
+    other_ca = next(ca for ca in resolver._per_ca if ca != ca_id)
+    new_cert = resolver._per_ca[other_ca][0]
+    resolver._per_ca_leaf[ca_id] = [old_cert]
+
+    html = b'<html><a href="a.cer">a</a><a href="b.cer">b</a></html>'
+
+    def fake_fetch(url, timeout=10):
+        if url == uri:
+            return html
+        if url.endswith("a.cer"):
+            return new_cert.public_bytes(Encoding.PEM)
+        return None
+
+    monkeypatch.setattr(kr, "_fetch_bytes", fake_fetch)
+    resolver.refresh_leaves(ca_id)
+
+    ders = {c.public_bytes(Encoding.DER) for c in resolver._per_ca_leaf[ca_id]}
+    assert old_cert.public_bytes(Encoding.DER) in ders
+    assert new_cert.public_bytes(Encoding.DER) in ders
+
+
+def test_load_cache_is_idempotent(tmp_path):
+    resolver = kr.KeyResolver.from_tsl(_tsl_bytes(), fetch_leaves=False)
+    ca_id = next(iter(resolver._tsp_uris))
+    cert = resolver._per_ca[ca_id][0]
+    (tmp_path / f"{ca_id}.pem").write_bytes(cert.public_bytes(Encoding.PEM))
+
+    resolver.load_cache(tmp_path)
+    resolver.load_cache(tmp_path)
+
+    assert resolver.leaf_count(ca_id) == 1
+
+
+def test_main_fails_when_no_leaves(tmp_path, monkeypatch):
+    monkeypatch.setattr(kr, "_fetch_bytes", lambda *args, **kwargs: None)
+    assert kr.main(["--cache-dir", str(tmp_path)]) == 1
+
+
 def test_lazy_leaves_only_fetch_requested_ca(monkeypatch):
     resolver = kr.KeyResolver.from_tsl(
         _tsl_bytes(), fetch_leaves=False, lazy_leaves=True

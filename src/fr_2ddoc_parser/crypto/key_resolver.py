@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import os
 import re
+import sys
 import threading
 import urllib.parse
 import urllib.request
@@ -257,6 +258,32 @@ def _derive_cert_ids(cert: x509.Certificate) -> list[str]:
     return list(ids)
 
 
+def _cert_fingerprint(cert: x509.Certificate) -> bytes:
+    return hashlib.sha256(cert.public_bytes(Encoding.DER)).digest()
+
+
+def _dedupe_certs(certs: Iterable[x509.Certificate]) -> list[x509.Certificate]:
+    seen: set[bytes] = set()
+    out: list[x509.Certificate] = []
+    for cert in certs:
+        fingerprint = _cert_fingerprint(cert)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        out.append(cert)
+    return out
+
+
+def _index_cert_ids(
+    ca_id: str,
+    cert: x509.Certificate,
+    target_index: dict[tuple[str, str], x509.Certificate],
+) -> None:
+    ca = ca_id.upper()
+    for cid in _derive_cert_ids(cert) + _ids_from_subject(cert):
+        target_index[(ca, cid.upper())] = cert
+
+
 def _index_cert_for_ca(
     ca_id: str,
     cert: x509.Certificate,
@@ -265,8 +292,7 @@ def _index_cert_for_ca(
 ) -> None:
     ca = ca_id.upper()
     target_bucket.setdefault(ca, []).append(cert)
-    for cid in _derive_cert_ids(cert) + _ids_from_subject(cert):
-        target_index[(ca, cid.upper())] = cert
+    _index_cert_ids(ca, cert, target_index)
 
 
 class KeyResolver:
@@ -355,10 +381,12 @@ class KeyResolver:
         ca = ca_id.upper()
         new_index: dict[tuple[str, str], x509.Certificate] = {}
         new_bucket: dict[str, list[x509.Certificate]] = {}
+        had_failure = False
 
         for uri in self._tsp_uris.get(ca, []):
             data = _fetch_bytes(uri, timeout=self._timeout)
             if not data:
+                had_failure = True
                 continue
             # 1) tenter des certs directement dans la page
             for c in _parse_any_certs(data):
@@ -371,6 +399,7 @@ class KeyResolver:
                 for link in _extract_links(data, uri):
                     blob = _fetch_bytes(link, timeout=self._timeout)
                     if not blob:
+                        had_failure = True
                         continue
                     for c in _parse_any_certs(blob):
                         try:
@@ -378,14 +407,21 @@ class KeyResolver:
                         except Exception:
                             pass
 
-        if not new_bucket:
+        new_certs = _dedupe_certs(new_bucket.get(ca, []))
+        if not new_certs:
             return False
 
-        # Remplace les feuilles du CA (évite les doublons au refresh).
+        # En cas d'échec partiel, conserve les certificats déjà en cache.
+        if had_failure:
+            merged = _dedupe_certs([*self._per_ca_leaf.get(ca, []), *new_certs])
+        else:
+            merged = new_certs
+
         for key in [k for k in self._leaf_index if k[0] == ca]:
             del self._leaf_index[key]
-        self._leaf_index.update(new_index)
-        self._per_ca_leaf[ca] = new_bucket.get(ca, [])
+        self._per_ca_leaf[ca] = merged
+        for c in merged:
+            _index_cert_ids(ca, c, self._leaf_index)
         return True
 
     def _write_cache_for_ca(self, ca_id: str, cache_dir: Path) -> None:
@@ -418,6 +454,7 @@ class KeyResolver:
                         _index_cert_for_ca(ca, c, self._leaf_index, self._per_ca_leaf)
                     except Exception:
                         pass
+                self._per_ca_leaf[ca] = _dedupe_certs(self._per_ca_leaf.get(ca, []))
                 self._leaves_loaded.add(ca)
 
     def refresh_leaves(
@@ -451,39 +488,40 @@ class KeyResolver:
     def resolve(self, ca_id: str, cert_id: str):
         """Retourne la *clé publique* pour (CA, cert_id), en préférant une feuille EC si dispo."""
         self._ensure_leaves(ca_id)
-        key = self._leaf_index.get((ca_id.upper(), (cert_id or "").upper()))
-        if key is not None:
-            return key.public_key()
+        with self._lock:
+            key = self._leaf_index.get((ca_id.upper(), (cert_id or "").upper()))
+            if key is not None:
+                return key.public_key()
 
-        key = self._index.get((ca_id.upper(), (cert_id or "").upper()))
-        if key is not None:
-            return key.public_key()
+            key = self._index.get((ca_id.upper(), (cert_id or "").upper()))
+            if key is not None:
+                return key.public_key()
 
-        # Fallback: unique feuille pour ce CA ?
-        leafs = self._per_ca_leaf.get(ca_id.upper(), [])
-        if len(leafs) == 1:
-            return leafs[0].public_key()
+            # Fallback: unique feuille pour ce CA ?
+            leafs = self._per_ca_leaf.get(ca_id.upper(), [])
+            if len(leafs) == 1:
+                return leafs[0].public_key()
 
-        # Sinon, fallback TSL classique: unique cert pour ce CA ?
-        certs = self._per_ca.get(ca_id.upper(), [])
-        if len(certs) == 1:
-            return certs[0].public_key()
+            # Sinon, fallback TSL classique: unique cert pour ce CA ?
+            certs = self._per_ca.get(ca_id.upper(), [])
+            if len(certs) == 1:
+                return certs[0].public_key()
 
-        # Debug: lister IDs possibles (feuilles + TSL)
-        possibles: set[str] = set()
-        for c in leafs:
-            possibles.update(_derive_cert_ids(c))
-            possibles.update(_ids_from_subject(c))
-        for c in certs:
-            possibles.update(_derive_cert_ids(c))
-            possibles.update(_ids_from_subject(c))
+            # Debug: lister IDs possibles (feuilles + TSL)
+            possibles: set[str] = set()
+            for c in leafs:
+                possibles.update(_derive_cert_ids(c))
+                possibles.update(_ids_from_subject(c))
+            for c in certs:
+                possibles.update(_derive_cert_ids(c))
+                possibles.update(_ids_from_subject(c))
 
-        if possibles:
-            raise KeyError(
-                f"Cert public introuvable pour AC={ca_id} cert_id={cert_id}. "
-                f"IDs possibles (leaf+tsl): {', '.join(sorted(possibles))}"
-            )
-        raise KeyError(f"AC inconnu: {ca_id}")
+            if possibles:
+                raise KeyError(
+                    f"Cert public introuvable pour AC={ca_id} cert_id={cert_id}. "
+                    f"IDs possibles (leaf+tsl): {', '.join(sorted(possibles))}"
+                )
+            raise KeyError(f"AC inconnu: {ca_id}")
 
     # Helpers optionnels
     def available_cert_ids(self, ca_id: str) -> set[str]:
@@ -493,8 +531,10 @@ class KeyResolver:
             out.update(_derive_cert_ids(c))
         return out
 
-    def leaf_count(self) -> int:
+    def leaf_count(self, ca_id: str | None = None) -> int:
         """Nombre de certificats feuilles actuellement chargés."""
+        if ca_id is not None:
+            return len(self._per_ca_leaf.get(ca_id.upper(), []))
         return sum(len(certs) for certs in self._per_ca_leaf.values())
 
 
@@ -600,8 +640,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.cas:
         for ca in args.cas:
             resolver.refresh_leaves(ca, cache_dir=args.cache_dir)
+        missing = [ca for ca in args.cas if resolver.leaf_count(ca) == 0]
+        if missing:
+            print(
+                f"Aucun certificat feuille pour : {', '.join(missing)}",
+                file=sys.stderr,
+            )
+            return 1
     else:
         resolver.refresh_leaves(cache_dir=args.cache_dir)
+        if resolver.leaf_count() == 0:
+            print("Aucun certificat feuille téléchargé.", file=sys.stderr)
+            return 1
 
     total = resolver.leaf_count()
     print(f"{total} certificat(s) feuille(s) écrit(s) dans {args.cache_dir}")
