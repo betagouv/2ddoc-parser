@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import logging
 import os
 import tempfile
@@ -12,6 +13,7 @@ from cryptography.hazmat.primitives.serialization import Encoding
 from fr_2ddoc_parser.crypto.key_resolver import (
     DEFAULT_TSL_URL,
     KeyResolver,
+    _cert_fingerprint,
     _extract_links,
     _fetch_bytes,
     _load_crl_bytes,
@@ -20,6 +22,7 @@ from fr_2ddoc_parser.crypto.key_resolver import (
     extract_crl_urls_from_certs,
 )
 from fr_2ddoc_parser.crypto.trust_validator import (
+    is_crl_applicable,
     validate_crl_against_ca,
     validate_leaf_against_ca,
     verify_tsl_xml_signature,
@@ -60,6 +63,7 @@ def sync_trust_store(
     tsl_url: str = DEFAULT_TSL_URL,
     root_ca_path: Path | None = None,
     timeout: int = 15,
+    evaluation_date: dt.date | None = None,
 ) -> KeyResolver:
     """Télécharge, vérifie cryptographiquement et écrit le snapshot de confiance ANTS.
 
@@ -98,7 +102,7 @@ def sync_trust_store(
         ca_certs_by_id.setdefault(rec.ca_id.upper(), []).append(rec.cert)
 
     leaves_pem_by_ca: dict[str, bytes] = {}
-    crl_der_by_ca: dict[str, bytes] = {}
+    crl_der_by_issuer: dict[str, tuple[str, bytes]] = {}
     total_leaves = 0
 
     for ca_id in sorted(ca_certs_by_id):
@@ -119,14 +123,19 @@ def sync_trust_store(
                     if sub_blob:
                         raw_certs.extend(_parse_any_certs(sub_blob))
 
-        verified_leaves: dict[int, tuple[str, x509.Certificate]] = {}
+        verified_leaves: dict[
+            tuple[str, int], tuple[str, x509.Certificate, x509.Certificate]
+        ] = {}
         for cert in raw_certs:
-            if cert.serial_number in verified_leaves:
-                continue
             for ca_cert in ca_certs:
                 try:
                     cid = validate_leaf_against_ca(cert, ca_cert)
-                    verified_leaves[cert.serial_number] = (cid, cert)
+                    issuer_key = _cert_fingerprint(ca_cert)
+                    verified_leaves[(issuer_key, cert.serial_number)] = (
+                        cid,
+                        cert,
+                        ca_cert,
+                    )
                     break
                 except UntrustedCertificateError:
                     continue
@@ -139,47 +148,60 @@ def sync_trust_store(
             continue
 
         leaves_pem_by_ca[ca_id] = b"".join(
-            cert.public_bytes(Encoding.PEM) for _, cert in sorted_leaves
+            cert.public_bytes(Encoding.PEM) for _, cert, _ in sorted_leaves
         )
         total_leaves += len(sorted_leaves)
         logger.info(
             "AC %s : %d certificat(s) feuille(s) vérifié(s)", ca_id, len(sorted_leaves)
         )
 
-        # CRLs depuis les CDPs des feuilles vérifiées (obligatoire pour chaque AC retenue)
-        crl_urls = extract_crl_urls_from_certs([c for _, c in sorted_leaves])
-        for crl_url in crl_urls:
-            crl_bytes = _fetch_bytes(crl_url, timeout=timeout)
-            if not crl_bytes:
-                continue
-            try:
-                crl = _load_crl_bytes(crl_bytes)
-            except Exception as exc:
-                logger.warning("CRL illisible (%s / %s): %s", ca_id, crl_url, exc)
-                continue
+        issuer_groups: dict[str, tuple[x509.Certificate, list[x509.Certificate]]] = {}
+        for _, leaf_cert, issuer_cert in sorted_leaves:
+            issuer_key = _cert_fingerprint(issuer_cert)
+            group = issuer_groups.setdefault(issuer_key, (issuer_cert, []))
+            group[1].append(leaf_cert)
 
-            matched_crl = False
-            for ca_cert in ca_certs:
+        # Une CRL courante est obligatoire pour chaque émetteur réellement retenu.
+        for issuer_key, (issuer_cert, issuer_leaves) in issuer_groups.items():
+            crl_urls = extract_crl_urls_from_certs(issuer_leaves)
+            for crl_url in crl_urls:
+                crl_bytes = _fetch_bytes(crl_url, timeout=timeout)
+                if not crl_bytes:
+                    continue
                 try:
-                    validate_crl_against_ca(crl, ca_cert)
-                    crl_der_by_ca[ca_id] = crl.public_bytes(Encoding.DER)
-                    matched_crl = True
-                    logger.info(
-                        "AC %s : CRL vérifiée (%d révocations, %s)",
+                    crl = _load_crl_bytes(crl_bytes)
+                except Exception as exc:
+                    logger.warning("CRL illisible (%s / %s): %s", ca_id, crl_url, exc)
+                    continue
+
+                try:
+                    validate_crl_against_ca(crl, issuer_cert)
+                    if not is_crl_applicable(crl, evaluation_date):
+                        logger.warning(
+                            "CRL non applicable à la date courante (%s / %s)",
+                            ca_id,
+                            crl_url,
+                        )
+                        continue
+                    crl_der_by_issuer[issuer_key] = (
                         ca_id,
+                        crl.public_bytes(Encoding.DER),
+                    )
+                    logger.info(
+                        "AC %s/%s : CRL vérifiée (%d révocations, %s)",
+                        ca_id,
+                        issuer_key[:12],
                         len(crl),
                         crl_url,
                     )
                     break
                 except TrustSignatureError:
                     continue
-            if matched_crl:
-                break
 
-        if ca_id not in crl_der_by_ca:
-            raise ResolverUnavailableError(
-                f"Aucune CRL valide récupérée pour l'AC {ca_id} (abandon fail-closed)."
-            )
+            if issuer_key not in crl_der_by_issuer:
+                raise ResolverUnavailableError(
+                    f"Aucune CRL courante valide récupérée pour l'émetteur {ca_id}/{issuer_key[:12]} (abandon fail-closed)."
+                )
 
     if total_leaves == 0:
         raise ResolverUnavailableError(
@@ -203,11 +225,14 @@ def sync_trust_store(
 
         crls_tmp = tmp_dir / "crls"
         crls_tmp.mkdir(parents=True, exist_ok=True)
-        for ca_id, der_crl in crl_der_by_ca.items():
-            (crls_tmp / f"{ca_id}.crl").write_bytes(der_crl)
+        for issuer_key, (ca_id, der_crl) in crl_der_by_issuer.items():
+            (crls_tmp / f"{ca_id}-{issuer_key}.crl").write_bytes(der_crl)
 
         # Validation complète du magasin stagé avant promotion
-        KeyResolver.from_trust_store(tmp_dir, require_crls=True)
+        staged = KeyResolver.from_trust_store(tmp_dir, require_crls=True)
+        staged._ensure_crl_coverage(
+            require_current=True, evaluation_date=evaluation_date
+        )
 
         target_dir.mkdir(parents=True, exist_ok=True)
         _atomic_sync_dir(leaves_tmp, target_dir / "trusted_leaves")
@@ -221,7 +246,7 @@ def sync_trust_store(
         "Magasin de confiance mis à jour dans %s (%d feuilles, %d CRLs)",
         target_dir,
         total_leaves,
-        len(crl_der_by_ca),
+        len(crl_der_by_issuer),
     )
     return KeyResolver.from_trust_store(target_dir, require_crls=True)
 

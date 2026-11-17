@@ -29,7 +29,7 @@ Runtime verification performs **zero outbound network requests**. A cryptographi
 | `ants_tsl_root_ca.pem` | Trust anchor (`CN=Autorité de Certification Services Applicatifs`, `2.5.4.5=4`) used to authenticate the TSL signer (`CN=ANTS CACHET 2DDOC`). |
 | `tsl_signed.xml` | Official ANTS ETSI TS 102 231 TSL (Sequence 23, `NextUpdate: 2027-05-11T14:00:00Z`), verified via XML-DSig on every load. |
 | `trusted_leaves/<CA_ID>.pem` | Verified leaf certificates per active CA (`FR01`, `FR03`, `FR04`, `FR05`, `FR06`, `FR07`, `FR09`), excluding test CA `FR00`. |
-| `crls/<CA_ID>.crl` | DER-encoded Certificate Revocation Lists signed by each CA. |
+| `crls/<CA_ID>-<issuer-sha256>.crl` | DER-encoded Certificate Revocation Lists signed by each exact issuing certificate. Legacy `<CA_ID>.crl` filenames remain supported. |
 
 An external directory can override the bundled snapshot via the `FR_2DDOC_TRUST_STORE_DIR` environment variable or by passing an explicit `KeyResolver` instance to `decode_2d_doc(..., key_resolver=...)`.
 
@@ -97,7 +97,8 @@ flowchart TD
 ### 4.1. XML-DSig & XSW Hardening (`verify_tsl_xml_signature`)
 - Rejects empty payloads and any `<!DOCTYPE` or `<!ENTITY` declaration before XML parsing.
 - Enforces structural uniqueness: exactly one `<ds:Signature>` element whose direct parent is the root `<tsl:TrustServiceStatusList>` element (prevents XML Signature Wrapping attacks).
-- Restricts algorithms to `RSA-SHA256/384/512`, `SHA-256/384/512` digests, and Inclusive C14N (`REC-xml-c14n-20010315`) / Exclusive C14N (`xml-exc-c14n#`) canonicalization.
+- Restricts algorithms to `RSA-SHA256/384/512`, `SHA-256/384/512` digests, and Inclusive C14N 1.0 (`REC-xml-c14n-20010315`) / Exclusive C14N 1.0 (`xml-exc-c14n#`), implemented with libxml2 through `lxml`.
+- Supports enveloped-signature removal and the ANTS `xmldsig-filter2` subtract profile for `/descendant::ds:Signature`; unsupported or reordered transform chains are rejected rather than ignored.
 - Requires `<ds:Reference URI="">` covering the full document (minus `<ds:Signature>`) and verifies every `#id`-targeted `<ds:Reference>` (including `<xades:SignedProperties>`) using constant-time `hmac.compare_digest`.
 - Verifies the TSL signer certificate directly against `ants_tsl_root_ca.pem` (`BasicConstraints.ca` must not be `True`; `KeyUsage.digital_signature` is required; `AuthorityKeyIdentifier == root.SubjectKeyIdentifier` when both are present).
 - Requires valid `tsl:ListIssueDateTime` and `tsl:NextUpdate` (`issue_date <= next_update`), and verifies that `xades:SigningTime` (or `tsl:ListIssueDateTime`) falls within the validity windows of both the TSL signer certificate and the ANTS root trust anchor.
@@ -109,15 +110,17 @@ flowchart TD
 - `KeyUsage.digital_signature` must be `True` on the leaf (extension required).
 - `AuthorityKeyIdentifier.key_identifier` must match `ca_cert` `SubjectKeyIdentifier.digest` when both are present.
 - `Subject` must contain a single `CommonName` (`CN`) matching `^[A-Za-z0-9]{4}$`, which serves as the sole authoritative `cert_id` lookup key (no heuristic truncation, no single-cert fallback).
-- Each CRL must match `crl.issuer == ca_cert.subject`, pass `crl.is_signature_valid(ca_cert.public_key())`, and satisfy `last_update <= next_update`.
-- `KeyResolver.from_trust_store(..., require_crls=True)` and `sync_trust_store()` fail closed if any active CA with loaded leaf certificates is missing a validated CRL.
+- Each CRL must match `crl.issuer == ca_cert.subject`, pass `crl.is_signature_valid(ca_cert.public_key())`, and satisfy `last_update <= next_update`. CRLs are indexed by the SHA-256 fingerprint of the actual issuing certificate, not only by the four-character CA ID; serial-number collisions between issuers therefore cannot revoke each other's leaves.
+- At verification, at least one CRL for that exact issuer must be applicable at the evaluation instant (`last_update <= evaluation <= next_update`). Missing, expired, future, or undated CRLs produce `RESOLVER_UNAVAILABLE`, never implicit non-revocation evidence.
+- `KeyResolver.from_trust_store(..., require_crls=True)`, `from_network()`, and `sync_trust_store()` fail closed if any retained issuing certificate lacks a validated CRL. Network refresh and synchronization additionally require currently applicable CRLs. `require_crls=False` is an explicit opt-out for callers that intentionally do not want revocation enforcement.
 
 ### 4.3. Temporal Validity, Rotation & Revocation Rules
 - **Reference date (`reference_date`)**: Derived from `header.signature_date` if present, else `header.issue_date`.
 - **Historical validity & PrivateKeyUsagePeriod**: If `reference_date` is present, both the leaf certificate and the CA certificate must be valid at `reference_date`, and any `PrivateKeyUsagePeriod` (`2.5.29.16`) bounds on the leaf certificate must contain `reference_date`. **A document validly signed in the past remains `VERIFIED` even if the certificate has since expired.**
 - **Certificate rotation**: Multiple leaf certificates sharing the same `(ca_id, cert_id)` (different serial numbers / validity periods) coexist in `KeyResolver`; verification evaluates all valid, non-revoked candidates for `reference_date` (including overlapping validity windows).
 - **Undated headers (`FFFF`)**: When both `signature_date` and `issue_date` are `None`, validity is evaluated against `evaluation_date` (default: current UTC date).
-- **Revocation (`check_certificate_revocation`)**: A certificate listed in its CA's signed CRL is rejected with `CERT_REVOKED` when:
+- **Revocation evidence freshness (`evaluation_date`)**: CRL applicability is evaluated independently of both the document's signing date and the TSL's `NextUpdate`. A historically signed document therefore needs current revocation evidence at verification time; an old signed CRL alone is insufficient. An explicit date-only evaluation compares UTC calendar dates, while the default uses the actual UTC instant.
+- **Revocation (`check_certificate_revocation`)**: A certificate listed in its exact issuer's applicable signed CRL is rejected with `CERT_REVOKED` when:
   - `reference_date is None`, OR
   - the CRL reason is `key_compromise` or `ca_compromise`, OR
   - `reference_date >= revocation_date`.
@@ -133,7 +136,7 @@ flowchart TD
 
 | `VerificationStatus` | `is_valid` | Meaning |
 |---|---|---|
-| `verified` | `True` | Signature valid, full TSL -> CA -> Leaf chain verified, non-revoked, valid at reference date, TSL fresh (or `strict_tsl_freshness=False`). |
+| `verified` | `True` | Signature valid, full TSL -> CA -> Leaf chain verified, non-revoked in an applicable issuer-specific CRL, valid at reference date, TSL fresh (or `strict_tsl_freshness=False`). |
 | `signature_missing` | `False` | No signature block present in the 2D-Doc payload. |
 | `signature_invalid` | `False` | Trusted leaf key found, but cryptographic verification failed (tampered payload or signature). |
 | `unknown_ca` | `False` | Header `ca_id` is absent from the trusted TSL (including test CA `FR00`). |
@@ -142,9 +145,13 @@ flowchart TD
 | `cert_revoked` | `False` | Leaf certificate is revoked in its CA's signed CRL for the signing context. |
 | `cert_not_valid_at_signing` | `False` | Reference date (or current date when `FFFF`) falls outside leaf/CA/`PrivateKeyUsagePeriod` validity bounds. |
 | `trust_list_expired` | `False` | TSL `NextUpdate` exceeded or missing (`STALE` / `UNKNOWN`) while `strict_tsl_freshness=True`. |
-| `resolver_unavailable` | `False` | Trust store missing, unreadable, missing CRLs, or failed integrity verification. |
+| `resolver_unavailable` | `False` | Trust store missing, unreadable, missing or temporally inapplicable CRLs for the actual issuer, or failed integrity verification. |
 
 ---
+
+### 5.1 Current snapshot limitation
+
+The packaged `FR01.crl` expired on 2022-06-27. It remains bundled as signed historical evidence, but it is not accepted as current revocation evidence. FR01 verification therefore returns `RESOLVER_UNAVAILABLE` until ANTS supplies an applicable CRL; other issuers are evaluated independently. This is deliberate fail-closed behavior, not a `CERT_REVOKED` verdict.
 
 ## 6. Operational Usage & Refresh
 

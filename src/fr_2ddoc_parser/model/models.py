@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -117,7 +117,6 @@ class Decoded2DDoc(BaseModel):
         le ``VerificationResult`` détaillé.
         """
         reference_date = self.header.signature_date or self.header.issue_date
-        effective_eval_date = evaluation_date or datetime.now(timezone.utc).date()
 
         tsl_seq: int | None = None
         tsl_next: datetime | None = None
@@ -177,7 +176,7 @@ class Decoded2DDoc(BaseModel):
                     self.header.ca_id,
                     self.header.cert_id,
                     reference_date=reference_date,
-                    evaluation_date=effective_eval_date,
+                    evaluation_date=evaluation_date,
                     tsl_eval_date=evaluation_date,
                     strict_tsl_freshness=strict_tsl_freshness,
                 )
@@ -187,7 +186,7 @@ class Decoded2DDoc(BaseModel):
                     self.header.ca_id,
                     self.header.cert_id,
                     reference_date=reference_date,
-                    evaluation_date=effective_eval_date,
+                    evaluation_date=evaluation_date,
                     tsl_eval_date=evaluation_date,
                     strict_tsl_freshness=strict_tsl_freshness,
                 )

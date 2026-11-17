@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.types import CertificatePublicKeyTypes
 from pydantic import BaseModel, ConfigDict
 
@@ -31,6 +32,7 @@ from fr_2ddoc_parser.crypto.trust_validator import (
     _get_extension,
     _parse_iso_datetime,
     check_certificate_revocation,
+    is_crl_applicable,
     validate_certificate_dates,
     validate_crl_against_ca,
     validate_leaf_against_ca,
@@ -58,6 +60,7 @@ DEFAULT_TSL_URL = "https://pub.ants.gouv.fr/2D-DOC/V1/PRD/01_TSL/tsl_signed.xml"
 _MAX_FETCH_BYTES = 10 * 1024 * 1024  # 10 MiB
 _MAX_LINKS_PER_PAGE = 500
 _CA_ID_RE = re.compile(r"^FR\d{2}$")
+_CRL_FILE_STEM_RE = re.compile(r"^(FR\d{2})(?:-[0-9A-Fa-f]{64})?$")
 _DEFAULT_URLOPEN = urllib.request.urlopen
 
 # Namespace map (TSL ETSI)
@@ -75,6 +78,10 @@ PEM_RE = re.compile(
     re.DOTALL,
 )
 HREF_RE = re.compile(rb'href\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def _cert_fingerprint(cert: x509.Certificate) -> str:
+    return cert.fingerprint(hashes.SHA256()).hex()
 
 
 class _CertRecord(BaseModel):
@@ -450,12 +457,16 @@ class KeyResolver:
         tsl_metadata: TslMetadata | None = None,
         leaf_candidates: Mapping[tuple[str, str], Sequence[x509.Certificate]]
         | None = None,
+        require_crls: bool = True,
     ) -> None:
         self._ca_records: dict[str, list[_CertRecord]] = {
             ca.upper(): list(recs) for ca, recs in (ca_records or {}).items()
         }
         self._leaf_candidates: dict[tuple[str, str], list[x509.Certificate]] = {}
         self._leaf_index: dict[tuple[str, str], x509.Certificate] = {}
+        self._crls_by_ca: dict[str, list[x509.CertificateRevocationList]] = {}
+        self._crls_by_issuer: dict[str, list[x509.CertificateRevocationList]] = {}
+        self._require_crls = require_crls
 
         if leaf_candidates:
             for (ca, cid), certs in leaf_candidates.items():
@@ -467,20 +478,21 @@ class KeyResolver:
                 key = (ca.upper(), cid.upper())
                 self._merge_leaf_candidates(key, [cert])
 
-        self._crls_by_ca: dict[str, list[x509.CertificateRevocationList]] = {
-            ca.upper(): list(crls) for ca, crls in (crls_by_ca or {}).items()
-        }
         self._tsl_metadata = tsl_metadata
+        for ca_id, crls in (crls_by_ca or {}).items():
+            for crl in crls:
+                self.add_crl(ca_id, crl)
 
     def _merge_leaf_candidates(
         self, key: tuple[str, str], certs: Sequence[x509.Certificate]
     ) -> None:
         bucket = self._leaf_candidates.setdefault(key, [])
-        seen_serials = {c.serial_number for c in bucket}
+        seen_certificates = {_cert_fingerprint(c) for c in bucket}
         for cert in certs:
-            if cert.serial_number not in seen_serials:
+            fingerprint = _cert_fingerprint(cert)
+            if fingerprint not in seen_certificates:
                 bucket.append(cert)
-                seen_serials.add(cert.serial_number)
+                seen_certificates.add(fingerprint)
         if bucket:
             bucket.sort(
                 key=lambda c: (
@@ -564,7 +576,8 @@ class KeyResolver:
         _, cert_id = self._match_ca_for_leaf(ca, leaf_cert)
         key = (ca, cert_id)
         existing = self._leaf_candidates.get(key, [])
-        if any(c.serial_number == leaf_cert.serial_number for c in existing):
+        fingerprint = _cert_fingerprint(leaf_cert)
+        if any(_cert_fingerprint(c) == fingerprint for c in existing):
             return cert_id
         if existing:
             logger.info(
@@ -577,7 +590,7 @@ class KeyResolver:
         return cert_id
 
     def add_crl(self, ca_id: str, crl: x509.CertificateRevocationList) -> None:
-        """Valide cryptographiquement puis associe une CRL à son AC."""
+        """Valide une CRL et l'associe au certificat émetteur exact."""
         ca = ca_id.upper()
         records = self._ca_records.get(ca)
         if not records:
@@ -590,12 +603,54 @@ class KeyResolver:
             try:
                 validate_crl_against_ca(crl, rec.cert)
                 self._crls_by_ca.setdefault(ca, []).append(crl)
+                issuer_key = _cert_fingerprint(rec.cert)
+                self._crls_by_issuer.setdefault(issuer_key, []).append(crl)
                 return
             except TrustSignatureError as exc:
                 last_err = exc
         raise last_err or TrustSignatureError(
             f"CRL invalide ou non signée par l'AC {ca_id}."
         )
+
+    def _active_issuer_certificates(self) -> dict[tuple[str, str], x509.Certificate]:
+        active: dict[tuple[str, str], x509.Certificate] = {}
+        for (ca_id, _), leaves in self._leaf_candidates.items():
+            for leaf in leaves:
+                rec, _ = self._match_ca_for_leaf(ca_id, leaf)
+                active[(ca_id, _cert_fingerprint(rec.cert))] = rec.cert
+        return active
+
+    def _ensure_crl_coverage(
+        self,
+        *,
+        require_current: bool = False,
+        evaluation_date: dt.date | None = None,
+    ) -> None:
+        """Exige une CRL pour chaque émetteur retenu, courante si demandé."""
+        missing: list[str] = []
+        not_current: list[str] = []
+        for (ca_id, issuer_key), ca_cert in self._active_issuer_certificates().items():
+            crls = self._crls_by_issuer.get(issuer_key, ())
+            if not crls:
+                missing.append(f"{ca_id}/{issuer_key[:12]}")
+            elif require_current and not any(
+                is_crl_applicable(crl, evaluation_date) for crl in crls
+            ):
+                not_current.append(f"{ca_id}/{issuer_key[:12]}")
+
+        if missing or not_current:
+            details: list[str] = []
+            if missing:
+                details.append(f"CRL(s) manquante(s): {', '.join(sorted(missing))}")
+            if not_current:
+                details.append(
+                    f"CRL(s) expirée(s), futures ou sans NextUpdate: {', '.join(sorted(not_current))}"
+                )
+            raise ResolverUnavailableError(
+                "Couverture CRL insuffisante pour les émetteurs de feuilles ("
+                + "; ".join(details)
+                + ")."
+            )
 
     @classmethod
     def from_tsl(
@@ -610,6 +665,7 @@ class KeyResolver:
         leaf_certs_by_ca: Mapping[str, Sequence[x509.Certificate]] | None = None,
         crls_by_ca: Mapping[str, Sequence[x509.CertificateRevocationList]]
         | None = None,
+        require_crls: bool = True,
     ) -> KeyResolver:
         """Construit un ``KeyResolver`` à partir d'une TSL XML.
 
@@ -640,7 +696,11 @@ class KeyResolver:
         for rec in recs:
             ca_records.setdefault(rec.ca_id, []).append(rec)
 
-        resolver = cls(ca_records=ca_records, tsl_metadata=meta)
+        resolver = cls(
+            ca_records=ca_records,
+            tsl_metadata=meta,
+            require_crls=require_crls,
+        )
 
         if leaf_certs_by_ca:
             for ca_id, certs in leaf_certs_by_ca.items():
@@ -666,11 +726,12 @@ class KeyResolver:
                             if blob:
                                 downloaded.extend(_parse_any_certs(blob))
 
-                seen_serials: set[int] = set()
+                seen_certificates: set[str] = set()
                 for cert in downloaded:
-                    if cert.serial_number in seen_serials:
+                    fingerprint = _cert_fingerprint(cert)
+                    if fingerprint in seen_certificates:
                         continue
-                    seen_serials.add(cert.serial_number)
+                    seen_certificates.add(fingerprint)
                     try:
                         resolver.add_leaf(ca_id, cert)
                     except UntrustedCertificateError as exc:
@@ -720,6 +781,7 @@ class KeyResolver:
             fetch_leaves=False,
             root_ca_cert=anchor,
             verify_tsl_signature=True,
+            require_crls=require_crls,
         )
 
         # 1) Chargement des feuilles depuis trusted_leaves/<CA_ID>.pem
@@ -812,13 +874,14 @@ class KeyResolver:
                 key=lambda p: p.name,
             )
             for crl_item in crl_files:
-                ca_id = crl_item.name[:-4].upper()
-                if not _CA_ID_RE.fullmatch(ca_id):
+                file_match = _CRL_FILE_STEM_RE.fullmatch(crl_item.name[:-4])
+                if file_match is None:
                     logger.warning(
-                        "Fichier CRL ignoré (nom ca_id invalide): %s",
+                        "Fichier CRL ignoré (nom de fichier invalide): %s",
                         crl_item.name,
                     )
                     continue
+                ca_id = file_match.group(1).upper()
                 try:
                     crl_bytes = crl_item.read_bytes()
                     crl = _load_crl_bytes(crl_bytes)
@@ -829,14 +892,7 @@ class KeyResolver:
                 resolver.add_crl(ca_id, crl)
 
         if require_crls:
-            active_cas = {ca_id for (ca_id, _) in resolver._leaf_index}
-            missing_crls = sorted(
-                ca_id for ca_id in active_cas if not resolver._crls_by_ca.get(ca_id)
-            )
-            if missing_crls:
-                raise ResolverUnavailableError(
-                    f"CRL(s) manquante(s) dans le magasin de confiance pour: {', '.join(missing_crls)}"
-                )
+            resolver._ensure_crl_coverage()
 
         return resolver
 
@@ -847,6 +903,7 @@ class KeyResolver:
         *,
         root_ca_cert: x509.Certificate | None = None,
         timeout: int = 15,
+        evaluation_date: dt.date | None = None,
     ) -> KeyResolver:
         """Télécharge explicitement la TSL, les feuilles et les CRLs avec vérification PKI."""
         anchor = root_ca_cert or _load_packaged_root_ca()
@@ -864,23 +921,42 @@ class KeyResolver:
             verify_tsl_signature=True,
         )
 
-        # Téléchargement et validation des CRLs depuis les CDPs des feuilles validées
-        leaves_by_ca: dict[str, list[x509.Certificate]] = {}
+        # Téléchargement des CRLs pour chaque certificat émetteur réellement retenu.
+        issuer_groups: dict[
+            str, tuple[str, x509.Certificate, list[x509.Certificate]]
+        ] = {}
         for (ca_id, _), candidates in resolver._leaf_candidates.items():
-            leaves_by_ca.setdefault(ca_id, []).extend(candidates)
+            for leaf in candidates:
+                matched_ca, _ = resolver._match_ca_for_leaf(ca_id, leaf)
+                issuer_key = _cert_fingerprint(matched_ca.cert)
+                group = issuer_groups.setdefault(
+                    issuer_key, (ca_id, matched_ca.cert, [])
+                )
+                group[2].append(leaf)
 
-        for ca_id, ca_leaves in leaves_by_ca.items():
+        for issuer_key, (ca_id, ca_cert, ca_leaves) in issuer_groups.items():
             for crl_url in extract_crl_urls_from_certs(ca_leaves):
                 crl_bytes = _fetch_bytes(crl_url, timeout=timeout)
                 if not crl_bytes:
                     continue
                 try:
                     crl = _load_crl_bytes(crl_bytes)
+                    validate_crl_against_ca(crl, ca_cert)
+                    if not is_crl_applicable(crl, evaluation_date):
+                        logger.warning(
+                            "CRL non applicable à la date courante ignorée (%s / %s)",
+                            ca_id,
+                            crl_url,
+                        )
+                        continue
                     resolver.add_crl(ca_id, crl)
                     break
                 except (TrustSignatureError, ValueError) as exc:
                     logger.warning("CRL ignorée (%s / %s): %s", ca_id, crl_url, exc)
 
+        resolver._ensure_crl_coverage(
+            require_current=True, evaluation_date=evaluation_date
+        )
         return resolver
 
     def resolve(self, ca_id: str, cert_id: str) -> CertificatePublicKeyTypes:
@@ -949,7 +1025,6 @@ class KeyResolver:
         revoked_err: CertificateRevokedError | None = None
         untrusted_err: UntrustedCertificateError | None = None
 
-        ca_crls = self._crls_by_ca.get(ca, ())
         for leaf_cert in candidates:
             try:
                 matched_ca, _ = self._match_ca_for_leaf(
@@ -960,7 +1035,16 @@ class KeyResolver:
                 continue
 
             try:
-                check_certificate_revocation(leaf_cert, ca_crls, reference_date)
+                if self._require_crls:
+                    issuer_crls = self._crls_by_issuer.get(
+                        _cert_fingerprint(matched_ca.cert), ()
+                    )
+                    check_certificate_revocation(
+                        leaf_cert,
+                        issuer_crls,
+                        reference_date,
+                        evaluation_date,
+                    )
             except CertificateRevokedError as exc:
                 revoked_err = revoked_err or exc
                 continue

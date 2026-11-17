@@ -193,7 +193,9 @@ Pour ajouter de nouveaux types de documents, consultez le [CONTRIBUTING.md](CONT
 La bibliothèque vérifie automatiquement la signature (ECDSA P-256/P-384/P-521 ou RSA) et la **chaîne de confiance PKI complète** du 2D-DOC en mode **100 % hors-ligne** (aucun appel réseau à l'import ni au runtime) :
 - Vérification XML-DSig de la **TSL ANTS** (`tsl_signed.xml`) ancrée sur `ants_tsl_root_ca.pem` et contrôle de fraîcheur (`NextUpdate`, fail-closed par défaut)
 - Vérification cryptographique de la chaîne **AC TSL → Certificat Feuille** (`BasicConstraints`, `KeyUsage`, `AKI/SKI`, `CN` exact sur 4 caractères, sans fallback silencieux)
-- Vérification des **CRL signées** par chaque AC et contrôle de la **validité temporelle à la date de signature** (`header.signature_date` ou `header.issue_date`)
+- Vérification des **CRL signées et applicables à la date d'évaluation** pour chaque certificat émetteur, et contrôle de la **validité temporelle à la date de signature** (`header.signature_date` ou `header.issue_date`)
+
+Une CRL absente, expirée, future ou sans `NextUpdate` ne constitue pas une preuve de non-révocation : la vérification retourne `RESOLVER_UNAVAILABLE`. Les CRL sont rattachées au certificat émetteur exact, y compris lors d'une rotation d'AC. Le mode `strict_tsl_freshness=False` ne désactive pas ce contrôle ; seul un `KeyResolver` construit explicitement avec `require_crls=False` le permet.
 
 Pour l'architecture détaillée et la matrice des états, consultez [docs/PKI_TRUST_ARCHITECTURE.md](docs/PKI_TRUST_ARCHITECTURE.md).
 

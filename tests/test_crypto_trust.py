@@ -8,10 +8,10 @@ import urllib.error
 import urllib.request
 import warnings
 import xml.dom.minidom as minidom
-import xml.etree.ElementTree as ET
 from http.client import HTTPMessage
 from pathlib import Path
 
+import lxml.etree as LET
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.x509.oid import NameOID
 
 from fr_2ddoc_parser.api import decode_2d_doc
+from fr_2ddoc_parser.crypto import key_resolver as key_resolver_mod
 from fr_2ddoc_parser.crypto import sync_trust_store as sync_mod
 from fr_2ddoc_parser.crypto.key_resolver import (
     _MAX_FETCH_BYTES,
@@ -37,6 +38,7 @@ from fr_2ddoc_parser.crypto.key_resolver import (
 )
 from fr_2ddoc_parser.crypto.trust_validator import (
     TslMetadata,
+    _canonicalize_subtree,
     check_certificate_revocation,
     validate_crl_against_ca,
     validate_leaf_against_ca,
@@ -219,6 +221,15 @@ def _build_leaf_cert(
     return builder.sign(issuer_key, hashes.SHA256())
 
 
+def _independent_c14n(xml: str, *, exclusive: bool) -> bytes:
+    return LET.tostring(
+        LET.fromstring(xml.encode("utf-8")),
+        method="c14n",
+        exclusive=exclusive,
+        with_comments=False,
+    )
+
+
 def _build_signed_tsl_xml(
     *,
     ca_entries: list[tuple[str, x509.Certificate, dt.datetime]],
@@ -277,7 +288,7 @@ def _build_signed_tsl_xml(
         "</tsl:TrustServiceStatusList>"
     )
 
-    c14n_doc = ET.canonicalize(unsigned_xml).encode("utf-8")
+    c14n_doc = _independent_c14n(unsigned_xml, exclusive=True)
     doc_digest = base64.b64encode(hashlib.sha256(c14n_doc).digest()).decode("ascii")
 
     signed_props_xml = (
@@ -288,7 +299,7 @@ def _build_signed_tsl_xml(
         "</xades:SignedSignatureProperties>"
         "</xades:SignedProperties>"
     )
-    c14n_sp = ET.canonicalize(signed_props_xml).encode("utf-8")
+    c14n_sp = _independent_c14n(signed_props_xml, exclusive=True)
     sp_digest = base64.b64encode(hashlib.sha256(c14n_sp).digest()).decode("ascii")
 
     signed_info_xml = (
@@ -305,7 +316,7 @@ def _build_signed_tsl_xml(
         "</ds:Reference>"
         "</ds:SignedInfo>"
     )
-    c14n_si = ET.canonicalize(signed_info_xml).encode("utf-8")
+    c14n_si = _independent_c14n(signed_info_xml, exclusive=True)
     sig_bytes = signer_key.sign(c14n_si, padding.PKCS1v15(), hashes.SHA256())
     sig_b64 = base64.b64encode(sig_bytes).decode("ascii")
     signer_b64 = base64.b64encode(signer_cert.public_bytes(Encoding.DER)).decode(
@@ -666,6 +677,7 @@ def test_tampered_payload_or_signature_and_missing_signature(synthetic_pki):
         synthetic_pki["tsl_bytes"],
         root_ca_cert=synthetic_pki["ants_root_cert"],
         leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"]]},
+        crls_by_ca={"FR06": [synthetic_pki["crl"]]},
     )
 
     valid_doc = _build_signed_2ddoc(
@@ -724,6 +736,7 @@ def test_validity_at_signing_date(synthetic_pki):
         synthetic_pki["tsl_bytes"],
         root_ca_cert=synthetic_pki["ants_root_cert"],
         leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"]]},
+        crls_by_ca={"FR06": [synthetic_pki["crl"]]},
     )
 
     # Feuille valide [2021-01-01 .. 2024-01-01], évaluation en 2026-11-17
@@ -874,10 +887,17 @@ def test_crl_revocation_and_crl_signature_verification(synthetic_pki):
 
 def test_tsl_expiry_tampering_and_xml_security(synthetic_pki):
     """Critère 10 : TSL périmée (strict vs non-strict), TSL altérée, XML DOCTYPE/XSW."""
+    crl = _build_crl(
+        synthetic_pki["ca_cert"],
+        synthetic_pki["ca_key"],
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update=dt.datetime(2028, 5, 1, tzinfo=dt.timezone.utc),
+    )
     resolver = KeyResolver.from_tsl(
         synthetic_pki["tsl_bytes"],
         root_ca_cert=synthetic_pki["ants_root_cert"],
         leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"]]},
+        crls_by_ca={"FR06": [crl]},
     )
     raw_doc = _build_signed_2ddoc(
         ca_id="FR06",
@@ -1000,14 +1020,20 @@ def test_embedded_snapshot_loads_offline_and_enforces_revocations(monkeypatch):
     fpe6_cert = resolver._leaf_index[("FR04", "FPE6")]
     with pytest.raises(Exception) as exc_info:
         check_certificate_revocation(
-            fpe6_cert, resolver._crls_by_ca["FR04"], dt.date(2024, 1, 15)
+            fpe6_cert,
+            resolver._crls_by_ca["FR04"],
+            dt.date(2024, 1, 15),
+            dt.date(2026, 11, 17),
         )
     assert "révoqué" in str(exc_info.value)
 
     test_0000_cert = resolver._leaf_index[("FR03", "0000")]
     with pytest.raises(Exception) as exc_info_2:
         check_certificate_revocation(
-            test_0000_cert, resolver._crls_by_ca["FR03"], dt.date(2016, 1, 1)
+            test_0000_cert,
+            resolver._crls_by_ca["FR03"],
+            dt.date(2016, 1, 1),
+            dt.date(2026, 11, 17),
         )
     assert "révoqué" in str(exc_info_2.value)
 
@@ -1175,7 +1201,9 @@ def test_sync_trust_store_atomic_fail_closed(
 
     # 1) Synchronisation nominale vers v43
     synced = sync_mod.sync_trust_store(
-        output_dir=tmp_path, tsl_url="https://tsl.example/tsl.xml"
+        output_dir=tmp_path,
+        tsl_url="https://tsl.example/tsl.xml",
+        evaluation_date=dt.date(2026, 11, 17),
     )
     assert synced.tsl_sequence_number == 43
     assert synced.available_cert_ids("FR06") == {"FPE2"}
@@ -1331,7 +1359,7 @@ def test_from_tsl_accepts_xml_string_without_oserror(synthetic_pki):
 def test_embedded_leaves_before_tsl_status_start_and_private_key_usage_period():
     """QUAL-03 : les 6 certificats antérieurs au StatusStartingTime passent et PrivateKeyUsagePeriod est appliqué."""
     reset_default_key_resolver()
-    resolver = get_default_key_resolver()
+    resolver = KeyResolver.from_trust_store(require_crls=False)
 
     early_cases = [
         ("FR01", "SFR0", dt.date(2012, 6, 28)),
@@ -1739,7 +1767,7 @@ def test_inclusive_c14n_and_naive_iso_datetimes_supported(synthetic_pki):
         "</tsl:TrustServiceProviderList>"
         "</tsl:TrustServiceStatusList>"
     )
-    c14n_doc = ET.canonicalize(unsigned_xml).encode("utf-8")
+    c14n_doc = _independent_c14n(unsigned_xml, exclusive=False)
     doc_digest = base64.b64encode(hashlib.sha256(c14n_doc).digest()).decode("ascii")
 
     # Inclusive C14N hérite de tous les xmlns ancêtres (ds, tsl, xades)
@@ -1752,7 +1780,7 @@ def test_inclusive_c14n_and_naive_iso_datetimes_supported(synthetic_pki):
         "</xades:SignedSignatureProperties>"
         "</xades:SignedProperties>"
     )
-    c14n_sp = ET.canonicalize(signed_props_inc).encode("utf-8")
+    c14n_sp = _independent_c14n(signed_props_inc, exclusive=False)
     sp_digest = base64.b64encode(hashlib.sha256(c14n_sp).digest()).decode("ascii")
 
     signed_info_for_digest = (
@@ -1762,16 +1790,23 @@ def test_inclusive_c14n_and_naive_iso_datetimes_supported(synthetic_pki):
         f'<ds:CanonicalizationMethod Algorithm="{c14n_inc}"/>'
         '<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>'
         '<ds:Reference URI="">'
+        "<ds:Transforms>"
+        '<ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>'
+        f'<ds:Transform Algorithm="{c14n_inc}"/>'
+        "</ds:Transforms>"
         '<ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>'
         f"<ds:DigestValue>{doc_digest}</ds:DigestValue>"
         "</ds:Reference>"
         '<ds:Reference URI="#xades-inc-1">'
+        "<ds:Transforms>"
+        f'<ds:Transform Algorithm="{c14n_inc}"/>'
+        "</ds:Transforms>"
         '<ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>'
         f"<ds:DigestValue>{sp_digest}</ds:DigestValue>"
         "</ds:Reference>"
         "</ds:SignedInfo>"
     )
-    c14n_si = ET.canonicalize(signed_info_for_digest).encode("utf-8")
+    c14n_si = _independent_c14n(signed_info_for_digest, exclusive=False)
     sig_bytes = signer_key.sign(c14n_si, padding.PKCS1v15(), hashes.SHA256())
     sig_b64 = base64.b64encode(sig_bytes).decode("ascii")
     signer_b64 = base64.b64encode(signer_cert.public_bytes(Encoding.DER)).decode(
@@ -1812,3 +1847,304 @@ def test_inclusive_c14n_and_naive_iso_datetimes_supported(synthetic_pki):
         tsl_inc, root_ca_cert=synthetic_pki["ants_root_cert"]
     )
     assert resolver.tsl_sequence_number == 77
+
+
+def test_expired_and_future_crls_make_verification_unavailable(synthetic_pki):
+    doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=dt.date(2022, 6, 15),
+        signature_date=dt.date(2022, 6, 15),
+        private_key=synthetic_pki["leaf_key"],
+    )
+    for last_update, next_update in [
+        (
+            dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
+            dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+        ),
+        (
+            dt.datetime(2027, 1, 1, tzinfo=dt.timezone.utc),
+            dt.datetime(2027, 1, 2, tzinfo=dt.timezone.utc),
+        ),
+    ]:
+        crl = _build_crl(
+            synthetic_pki["ca_cert"],
+            synthetic_pki["ca_key"],
+            last_update=last_update,
+            next_update=next_update,
+        )
+        resolver = KeyResolver.from_tsl(
+            synthetic_pki["tsl_bytes"],
+            root_ca_cert=synthetic_pki["ants_root_cert"],
+            leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"]]},
+            crls_by_ca={"FR06": [crl]},
+        )
+        decoded = decode_2d_doc(
+            doc,
+            key_resolver=resolver,
+            evaluation_date=dt.date(2026, 11, 17),
+        )
+        assert decoded.is_valid is False
+        assert decoded.verification is not None
+        assert decoded.verification.status == VerificationStatus.RESOLVER_UNAVAILABLE
+
+
+def test_packaged_expired_fr01_crl_is_not_accepted_as_current_evidence():
+    reset_default_key_resolver()
+    resolver = get_default_key_resolver()
+    with pytest.raises(ResolverUnavailableError):
+        resolver.resolve_for_verification(
+            "FR01",
+            "SFR0",
+            reference_date=dt.date(2012, 6, 28),
+            evaluation_date=dt.date(2026, 11, 17),
+        )
+
+
+def test_from_network_fails_closed_when_crl_download_fails(monkeypatch, synthetic_pki):
+    tsl_with_uri = _build_signed_tsl_xml(
+        ca_entries=[
+            (
+                "FR06",
+                synthetic_pki["ca_cert"],
+                dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+            )
+        ],
+        signer_cert=synthetic_pki["tsl_signer_cert"],
+        signer_key=synthetic_pki["tsl_signer_key"],
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        tsp_uris={"FR06": "https://ca.example/fr06.der"},
+    )
+    leaf_der = synthetic_pki["leaf_cert"].public_bytes(Encoding.DER)
+
+    def _fetch_without_crl(url: str, timeout: int = 15) -> bytes | None:
+        if url == "https://tsl.example/tsl.xml":
+            return tsl_with_uri
+        if url == "https://ca.example/fr06.der":
+            return leaf_der
+        return None
+
+    monkeypatch.setattr(key_resolver_mod, "_fetch_bytes", _fetch_without_crl)
+    monkeypatch.setattr(
+        key_resolver_mod,
+        "extract_crl_urls_from_certs",
+        lambda certs: ["https://ca.example/fr06.crl"],
+    )
+    with pytest.raises(ResolverUnavailableError):
+        KeyResolver.from_network(
+            "https://tsl.example/tsl.xml",
+            root_ca_cert=synthetic_pki["ants_root_cert"],
+            evaluation_date=dt.date(2026, 11, 17),
+        )
+
+    def _fetch_with_crl(url: str, timeout: int = 15) -> bytes | None:
+        if url == "https://ca.example/fr06.crl":
+            return synthetic_pki["crl"].public_bytes(Encoding.DER)
+        return _fetch_without_crl(url, timeout)
+
+    monkeypatch.setattr(key_resolver_mod, "_fetch_bytes", _fetch_with_crl)
+    resolver = KeyResolver.from_network(
+        "https://tsl.example/tsl.xml",
+        root_ca_cert=synthetic_pki["ants_root_cert"],
+        evaluation_date=dt.date(2026, 11, 17),
+    )
+    doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=dt.date(2022, 6, 15),
+        signature_date=dt.date(2022, 6, 15),
+        private_key=synthetic_pki["leaf_key"],
+    )
+    decoded = decode_2d_doc(
+        doc,
+        key_resolver=resolver,
+        evaluation_date=dt.date(2026, 11, 17),
+    )
+    assert decoded.is_valid is True
+    assert decoded.verification is not None
+    assert decoded.verification.status == VerificationStatus.VERIFIED
+
+
+def _build_rotated_issuer_fixture(synthetic_pki):
+    new_ca_key = _make_ec_key()
+    new_ca_cert = _build_ca_cert(
+        "FR06",
+        new_ca_key,
+        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+        not_after=dt.datetime(2032, 1, 1, tzinfo=dt.timezone.utc),
+    )
+    new_leaf_key = _make_ec_key()
+    new_leaf_cert = _build_leaf_cert(
+        "FPE2",
+        new_leaf_key,
+        new_ca_cert,
+        new_ca_key,
+        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
+        not_after=dt.datetime(2027, 1, 1, tzinfo=dt.timezone.utc),
+        serial=4242,
+    )
+    status_start = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+    tsl = _build_signed_tsl_xml(
+        ca_entries=[
+            ("FR06", synthetic_pki["ca_cert"], status_start),
+            ("FR06", new_ca_cert, status_start),
+        ],
+        signer_cert=synthetic_pki["tsl_signer_cert"],
+        signer_key=synthetic_pki["tsl_signer_key"],
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+    )
+    old_crl = _build_crl(
+        synthetic_pki["ca_cert"],
+        synthetic_pki["ca_key"],
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        revoked_entries=[
+            (
+                4242,
+                dt.datetime(2021, 6, 1, tzinfo=dt.timezone.utc),
+                x509.ReasonFlags.cessation_of_operation,
+            )
+        ],
+    )
+    new_crl = _build_crl(
+        new_ca_cert,
+        new_ca_key,
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+    )
+    return tsl, new_ca_cert, new_leaf_key, new_leaf_cert, old_crl, new_crl
+
+
+def test_trust_store_requires_crl_for_actual_issuer(tmp_path: Path, synthetic_pki):
+    tsl, new_ca_cert, _, new_leaf_cert, old_crl, new_crl = (
+        _build_rotated_issuer_fixture(synthetic_pki)
+    )
+    (tmp_path / "ants_tsl_root_ca.pem").write_bytes(
+        synthetic_pki["ants_root_cert"].public_bytes(Encoding.PEM)
+    )
+    (tmp_path / "tsl_signed.xml").write_bytes(tsl)
+    (tmp_path / "trusted_leaves").mkdir()
+    (tmp_path / "trusted_leaves" / "FR06.pem").write_bytes(
+        new_leaf_cert.public_bytes(Encoding.PEM)
+    )
+    (tmp_path / "crls").mkdir()
+    (tmp_path / "crls" / "FR06.crl").write_bytes(old_crl.public_bytes(Encoding.DER))
+
+    with pytest.raises(ResolverUnavailableError):
+        KeyResolver.from_trust_store(tmp_path)
+
+    issuer_id = new_ca_cert.fingerprint(hashes.SHA256()).hex()
+    (tmp_path / "crls" / f"FR06-{issuer_id}.crl").write_bytes(
+        new_crl.public_bytes(Encoding.DER)
+    )
+    resolver = KeyResolver.from_trust_store(tmp_path)
+    assert resolver.available_cert_ids("FR06") == {"FPE2"}
+
+
+def test_crl_serial_collisions_are_issuer_scoped(synthetic_pki):
+    tsl, _, new_leaf_key, new_leaf_cert, old_crl, new_crl = (
+        _build_rotated_issuer_fixture(synthetic_pki)
+    )
+    resolver = KeyResolver.from_tsl(
+        tsl,
+        root_ca_cert=synthetic_pki["ants_root_cert"],
+        leaf_certs_by_ca={"FR06": [new_leaf_cert]},
+        crls_by_ca={"FR06": [old_crl, new_crl]},
+    )
+    doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=dt.date(2022, 6, 15),
+        signature_date=dt.date(2022, 6, 15),
+        private_key=new_leaf_key,
+    )
+    decoded = decode_2d_doc(
+        doc,
+        key_resolver=resolver,
+        evaluation_date=dt.date(2026, 11, 17),
+    )
+    assert decoded.is_valid is True
+    assert decoded.verification is not None
+    assert decoded.verification.status == VerificationStatus.VERIFIED
+
+
+def test_default_tsl_freshness_uses_current_instant(monkeypatch, synthetic_pki):
+    tsl = _build_signed_tsl_xml(
+        ca_entries=[
+            (
+                "FR06",
+                synthetic_pki["ca_cert"],
+                dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+            )
+        ],
+        signer_cert=synthetic_pki["tsl_signer_cert"],
+        signer_key=synthetic_pki["tsl_signer_key"],
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update_dt=dt.datetime(2027, 5, 1, 0, 0, tzinfo=dt.timezone.utc),
+    )
+    crl = _build_crl(
+        synthetic_pki["ca_cert"],
+        synthetic_pki["ca_key"],
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+        next_update=dt.datetime(2027, 5, 2, tzinfo=dt.timezone.utc),
+    )
+    resolver = KeyResolver.from_tsl(
+        tsl,
+        root_ca_cert=synthetic_pki["ants_root_cert"],
+        leaf_certs_by_ca={"FR06": [synthetic_pki["leaf_cert"]]},
+        crls_by_ca={"FR06": [crl]},
+    )
+    doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=dt.date(2022, 6, 15),
+        signature_date=dt.date(2022, 6, 15),
+        private_key=synthetic_pki["leaf_key"],
+    )
+
+    class _FrozenDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls(2027, 5, 1, 12, 0, tzinfo=dt.timezone.utc)
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    monkeypatch.setattr(key_resolver_mod.dt, "datetime", _FrozenDateTime)
+    monkeypatch.setattr("fr_2ddoc_parser.model.models.datetime", _FrozenDateTime)
+    decoded = decode_2d_doc(doc, key_resolver=resolver)
+    assert decoded.is_valid is False
+    assert decoded.verification is not None
+    assert decoded.verification.status == VerificationStatus.TRUST_LIST_EXPIRED
+    assert decoded.verification.tsl_freshness == TrustListFreshness.STALE
+
+
+def test_inclusive_c14n_matches_independent_libxml2_vector():
+    document = minidom.parseString(
+        '<a:root xmlns:a="urn:a" xmlns:unused="urn:unused"><a:x/></a:root>'
+    )
+    root = document.documentElement
+    assert root is not None
+    assert _canonicalize_subtree(root, exclusive=False) == (
+        b'<a:root xmlns:a="urn:a" xmlns:unused="urn:unused"><a:x></a:x></a:root>'
+    )
+    assert _canonicalize_subtree(root, exclusive=True) == (
+        b'<a:root xmlns:a="urn:a"><a:x></a:x></a:root>'
+    )
+
+
+def test_unsupported_xpath_filter_is_rejected(synthetic_pki):
+    transform = (
+        b"<ds:Transforms><ds:Transform "
+        b'Algorithm="http://www.w3.org/2002/06/xmldsig-filter2">'
+        b'<dsig-filter2:XPath xmlns:dsig-filter2="http://www.w3.org/2002/06/xmldsig-filter2" '
+        b'Filter="subtract">/descendant::ds:KeyInfo</dsig-filter2:XPath>'
+        b"</ds:Transform></ds:Transforms>"
+    )
+    tsl = synthetic_pki["tsl_bytes"].replace(
+        b'<ds:Reference URI=""><ds:DigestMethod',
+        b'<ds:Reference URI="">' + transform + b"<ds:DigestMethod",
+        1,
+    )
+    with pytest.raises(TrustSignatureError, match="xmldsig-filter2"):
+        verify_tsl_xml_signature(tsl, synthetic_pki["ants_root_cert"])

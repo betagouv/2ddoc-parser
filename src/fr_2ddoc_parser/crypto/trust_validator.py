@@ -6,13 +6,13 @@ import hmac
 import re
 import warnings
 import xml.dom.minidom as minidom
-import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import TypeVar
 from xml.parsers.expat import ExpatError
 
+import lxml.etree as LET
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes
@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives.asymmetric import (
 from fr_2ddoc_parser.exception.exceptions import (
     CertificateRevokedError,
     CertificateValidityError,
+    ResolverUnavailableError,
     TrustSignatureError,
     UntrustedCertificateError,
 )
@@ -41,6 +42,9 @@ _FORBIDDEN_XML_DECL_RE = re.compile(rb"<!\s*(DOCTYPE|ENTITY)\b", re.IGNORECASE)
 
 _C14N_EXC = "http://www.w3.org/2001/10/xml-exc-c14n#"
 _C14N_INC = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+_ENVELOPED_SIGNATURE = "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
+_XMLDSIG_FILTER2 = "http://www.w3.org/2002/06/xmldsig-filter2"
+_ANTS_SUBTRACT_SIGNATURE_XPATH = "/descendant::ds:Signature"
 
 _ALLOWED_C14N_ALGS = frozenset(
     {
@@ -224,7 +228,7 @@ def _element_text(element: minidom.Element | None) -> str:
 
 
 def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> bytes:
-    """Canonicalise un sous-arbre XML selon C14N exclusif ou inclusif."""
+    """Canonicalise un sous-arbre avec C14N 1.0 inclusif ou exclusif via libxml2."""
     ns_map: dict[str, str] = {}
     cur: minidom.Node | None = node
     while cur is not None and isinstance(cur, minidom.Element):
@@ -237,46 +241,25 @@ def _canonicalize_subtree(node: minidom.Element, *, exclusive: bool = True) -> b
                     ns_map.setdefault(attr.name, attr.value)
         cur = cur.parentNode
 
-    if exclusive:
-        used_ns_attrs: set[str] = set()
-
-        def _walk(el: minidom.Node) -> None:
-            if not isinstance(el, minidom.Element):
-                return
-            if ":" in el.tagName:
-                prefix = el.tagName.split(":", 1)[0]
-                if prefix != "xml":
-                    used_ns_attrs.add(f"xmlns:{prefix}")
-            elif el.namespaceURI:
-                used_ns_attrs.add("xmlns")
-
-            if el.attributes:
-                for i in range(el.attributes.length):
-                    attr = el.attributes.item(i)
-                    if not isinstance(attr, minidom.Attr):
-                        continue
-                    if ":" in attr.name and not attr.name.startswith("xmlns:"):
-                        prefix = attr.name.split(":", 1)[0]
-                        if prefix != "xml":
-                            used_ns_attrs.add(f"xmlns:{prefix}")
-
-            for child in el.childNodes:
-                _walk(child)
-
-        _walk(node)
-        ns_attrs_to_copy = sorted(used_ns_attrs)
-    else:
-        ns_attrs_to_copy = sorted(ns_map.keys())
-
     clone = node.cloneNode(deep=True)
     if not isinstance(clone, minidom.Element):
         raise TrustSignatureError("Noeud XML invalide lors de la canonicalisation.")
-    for ns_attr in ns_attrs_to_copy:
-        if ns_attr in ns_map and not clone.hasAttribute(ns_attr):
-            clone.setAttribute(ns_attr, ns_map[ns_attr])
+    for ns_attr, ns_value in sorted(ns_map.items()):
+        if not clone.hasAttribute(ns_attr):
+            clone.setAttribute(ns_attr, ns_value)
 
-    canonical = ET.canonicalize(clone.toxml())
-    return canonical.encode("utf-8")
+    try:
+        element = LET.fromstring(clone.toxml().encode("utf-8"))
+    except LET.XMLSyntaxError as exc:
+        raise TrustSignatureError(
+            f"Noeud XML invalide lors de la canonicalisation: {exc}"
+        ) from exc
+    return LET.tostring(
+        element,
+        method="c14n",
+        exclusive=exclusive,
+        with_comments=False,
+    )
 
 
 def _canonicalize_subtree_exc(node: minidom.Element) -> bytes:
@@ -322,15 +305,59 @@ def _find_unique_element_by_id(
 
 
 def _resolve_reference_c14n_exclusive(
-    ref_el: minidom.Element, *, default_exclusive: bool
+    ref_el: minidom.Element,
+    *,
+    default_exclusive: bool,
+    allow_enveloped: bool,
 ) -> bool:
-    """Détermine si une référence ds:Reference utilise C14N exclusif selon ds:Transforms."""
+    """Valide les transforms supportées et détermine le mode C14N d'une référence."""
     transforms_els = _direct_children_ns(ref_el, DS_NS, "Transforms")
+    if len(transforms_els) > 1:
+        raise TrustSignatureError("ds:Transforms multiple dans ds:Reference.")
+
+    algorithms: list[str] = []
     for transforms_el in transforms_els:
         for transform_el in _direct_children_ns(transforms_el, DS_NS, "Transform"):
-            alg = transform_el.getAttribute("Algorithm")
-            if alg in _ALLOWED_C14N_ALGS:
-                return alg == _C14N_EXC
+            algorithm = transform_el.getAttribute("Algorithm")
+            algorithms.append(algorithm)
+            if algorithm == _XMLDSIG_FILTER2:
+                xpath_els = _direct_children_ns(transform_el, _XMLDSIG_FILTER2, "XPath")
+                if (
+                    not allow_enveloped
+                    or len(xpath_els) != 1
+                    or xpath_els[0].getAttribute("Filter") != "subtract"
+                    or _element_text(xpath_els[0]) != _ANTS_SUBTRACT_SIGNATURE_XPATH
+                ):
+                    raise TrustSignatureError(
+                        "Seule la soustraction xmldsig-filter2 de /descendant::ds:Signature est supportée pour URI=''."
+                    )
+
+    allowed = {_ENVELOPED_SIGNATURE, _XMLDSIG_FILTER2, *_ALLOWED_C14N_ALGS}
+    for algorithm in algorithms:
+        if algorithm not in allowed:
+            raise TrustSignatureError(
+                f"Transform XML-DSig non supportée: {algorithm!r}"
+            )
+    if len(set(algorithms)) != len(algorithms):
+        raise TrustSignatureError("Transform XML-DSig dupliquée dans ds:Reference.")
+    if algorithms.count(_ENVELOPED_SIGNATURE) and not allow_enveloped:
+        raise TrustSignatureError(
+            "La transform enveloped-signature n'est supportée que pour URI=''."
+        )
+    signature_transforms = {_ENVELOPED_SIGNATURE, _XMLDSIG_FILTER2}
+    for signature_transform in signature_transforms:
+        if signature_transform in algorithms and algorithms[0] != signature_transform:
+            raise TrustSignatureError(
+                "La suppression de la signature doit précéder la canonicalisation."
+            )
+
+    c14n_algorithms = [alg for alg in algorithms if alg in _ALLOWED_C14N_ALGS]
+    if c14n_algorithms and algorithms[-1] != c14n_algorithms[-1]:
+        raise TrustSignatureError(
+            "La canonicalisation doit être la dernière transform XML-DSig."
+        )
+    if c14n_algorithms:
+        return c14n_algorithms[0] == _C14N_EXC
     return default_exclusive
 
 
@@ -497,7 +524,9 @@ def verify_tsl_xml_signature(
             raise TrustSignatureError(f"DigestValue base64 invalide: {exc}") from exc
 
         ref_exclusive = _resolve_reference_c14n_exclusive(
-            ref_el, default_exclusive=signed_info_exclusive
+            ref_el,
+            default_exclusive=signed_info_exclusive,
+            allow_enveloped=uri == "",
         )
 
         target_el: minidom.Element | None = None
@@ -689,19 +718,41 @@ def validate_crl_against_ca(
         )
 
 
+def is_crl_applicable(
+    crl: x509.CertificateRevocationList,
+    evaluation_date: date | None = None,
+) -> bool:
+    """Indique si une CRL est applicable à l'instant ou à la date d'évaluation."""
+    last_update = crl.last_update_utc
+    next_update = crl.next_update_utc
+    if last_update is None or next_update is None:
+        return False
+    if evaluation_date is not None:
+        return last_update.date() <= evaluation_date <= next_update.date()
+    now = datetime.now(timezone.utc)
+    return last_update <= now <= next_update
+
+
 def check_certificate_revocation(
     leaf_cert: x509.Certificate,
     crls: Sequence[x509.CertificateRevocationList],
     reference_date: date | None,
+    evaluation_date: date | None = None,
 ) -> None:
-    """Contrôle si un certificat feuille est révoqué dans les CRLs de son AC.
+    """Contrôle la révocation avec des CRLs applicables à l'évaluation.
 
-    Rejette avec ``CertificateRevokedError`` si le numéro de série est révoqué et :
-      - ``reference_date is None``, OU
-      - la raison de révocation est ``key_compromise`` ou ``ca_compromise``, OU
-      - ``reference_date >= revocation_date``.
+    En l'absence de CRL courante, la preuve de non-révocation est indisponible et
+    la vérification échoue fermée avec ``ResolverUnavailableError``.
+    Un certificat listé est rejeté si ``reference_date`` est absente, si la raison
+    est une compromission, ou si ``reference_date >= revocation_date``.
     """
-    for crl in crls:
+    applicable_crls = [crl for crl in crls if is_crl_applicable(crl, evaluation_date)]
+    if not applicable_crls:
+        raise ResolverUnavailableError(
+            "Aucune CRL applicable à la date d'évaluation pour ce certificat."
+        )
+
+    for crl in applicable_crls:
         revoked = crl.get_revoked_certificate_by_serial_number(leaf_cert.serial_number)
         if revoked is None:
             continue
