@@ -488,7 +488,9 @@ class KeyResolver:
                 with self._lock:
                     if new_certs:
                         self._publish_leaves_for_ca(ca, new_certs, had_failure)
-                    if self._per_ca_leaf.get(ca):
+                    if had_failure:
+                        self._leaves_loaded.discard(ca)
+                    elif self._per_ca_leaf.get(ca):
                         self._leaves_loaded.add(ca)
                     if target is not None:
                         self._write_cache_for_ca(ca, target)
@@ -509,7 +511,10 @@ class KeyResolver:
                 return
             with self._lock:
                 self._publish_leaves_for_ca(ca, new_certs, had_failure)
-                self._leaves_loaded.add(ca)
+                if had_failure:
+                    self._leaves_loaded.discard(ca)
+                else:
+                    self._leaves_loaded.add(ca)
                 if self._cache_dir is not None:
                     self._write_cache_for_ca(ca, self._cache_dir)
 

@@ -110,6 +110,59 @@ def test_partial_refresh_preserves_cached_certs(monkeypatch):
     assert new_cert.public_bytes(Encoding.DER) in ders
 
 
+def test_partial_refresh_clears_loaded_marker(monkeypatch):
+    resolver = kr.KeyResolver.from_tsl(_tsl_bytes(), fetch_leaves=False)
+    ca_id = next(iter(resolver._tsp_uris))
+    uri = resolver._tsp_uris[ca_id][0]
+    cert = resolver._per_ca[ca_id][0]
+    resolver._leaves_loaded.add(ca_id)
+
+    html = b'<html><a href="a.cer">a</a><a href="b.cer">b</a></html>'
+
+    def fake_fetch(url, timeout=10):
+        if url == uri:
+            return html
+        if url.endswith("a.cer"):
+            return cert.public_bytes(Encoding.PEM)
+        return None
+
+    monkeypatch.setattr(kr, "_fetch_bytes", fake_fetch)
+    resolver.refresh_leaves(ca_id)
+
+    assert ca_id not in resolver._leaves_loaded
+
+
+def test_partial_lazy_fetch_is_retried(monkeypatch):
+    resolver = kr.KeyResolver.from_tsl(
+        _tsl_bytes(), fetch_leaves=False, lazy_leaves=True
+    )
+    ca_id = next(iter(resolver._tsp_uris))
+    uri = resolver._tsp_uris[ca_id][0]
+    cert = resolver._per_ca[ca_id][0]
+    called: list[str] = []
+
+    html = b'<html><a href="a.cer">a</a><a href="b.cer">b</a></html>'
+
+    def fake_fetch(url, timeout=10):
+        called.append(url)
+        if url == uri:
+            return html
+        if url.endswith("a.cer"):
+            return cert.public_bytes(Encoding.PEM)
+        return None
+
+    monkeypatch.setattr(kr, "_fetch_bytes", fake_fetch)
+
+    for _ in range(2):
+        try:
+            resolver.resolve(ca_id, "XXXX")
+        except KeyError:
+            pass
+
+    assert ca_id not in resolver._leaves_loaded
+    assert len(called) == 2 * (1 + 2)
+
+
 def test_unparseable_link_preserves_cached_certs(monkeypatch):
     resolver = kr.KeyResolver.from_tsl(_tsl_bytes(), fetch_leaves=False)
     ca_id = next(iter(resolver._tsp_uris))
