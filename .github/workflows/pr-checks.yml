@@ -36,3 +36,6 @@ jobs:
       - name: Run tests
         run: uv run pytest tests/ -v --tb=short
 
+      - name: Run tests with minimum cryptography
+        run: uv run --isolated --with 'cryptography==45.0.1' --with pytest pytest tests/ -q
+

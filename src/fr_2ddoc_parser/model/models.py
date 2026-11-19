@@ -1,15 +1,69 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from enum import Enum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from fr_2ddoc_parser.crypto.crypto import verify_signature
-from fr_2ddoc_parser.crypto.key_resolver import KeyResolver
+from fr_2ddoc_parser.exception.exceptions import (
+    CertificateRevokedError,
+    CertificateValidityError,
+    ResolverUnavailableError,
+    TrustListExpiredError,
+    TrustSignatureError,
+    TwoDDocSignatureError,
+    UnknownCAError,
+    UnknownCertificateError,
+    UntrustedCertificateError,
+)
 from fr_2ddoc_parser.type.base import GenericDoc
+
+if TYPE_CHECKING:
+    from fr_2ddoc_parser.crypto.key_resolver import KeyResolver
 
 GS = "\x1d"  # Group Separator (sépare les paires champ/valeur)
 US = "\x1f"  # Unit Separator (sépare les données de la signature)
+
+
+class VerificationStatus(str, Enum):
+    """Statut détaillé de la vérification cryptographique et PKI d'un 2D-DOC."""
+
+    VERIFIED = "verified"
+    SIGNATURE_MISSING = "signature_missing"
+    SIGNATURE_INVALID = "signature_invalid"
+    UNKNOWN_CA = "unknown_ca"
+    UNKNOWN_CERT = "unknown_cert"
+    UNTRUSTED_CERTIFICATE = "untrusted_certificate"
+    CERT_REVOKED = "cert_revoked"
+    CERT_NOT_VALID_AT_SIGNING = "cert_not_valid_at_signing"
+    TRUST_LIST_EXPIRED = "trust_list_expired"
+    RESOLVER_UNAVAILABLE = "resolver_unavailable"
+
+
+class TrustListFreshness(str, Enum):
+    """État de fraîcheur de la liste de confiance (TSL)."""
+
+    FRESH = "fresh"
+    STALE = "stale"
+    UNKNOWN = "unknown"
+
+
+class VerificationResult(BaseModel):
+    """Résultat détaillé et immuable de la vérification d'un 2D-DOC."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: VerificationStatus
+    is_valid: bool
+    ca_id: str | None = None
+    cert_id: str | None = None
+    reference_date: date | None = None
+    tsl_sequence_number: int | None = None
+    tsl_next_update: datetime | None = None
+    tsl_freshness: TrustListFreshness = TrustListFreshness.UNKNOWN
+    detail: str | None = None
 
 
 class Header(BaseModel):
@@ -47,11 +101,148 @@ class Decoded2DDoc(BaseModel):
         default_factory=lambda: SignatureBlock(present=False)
     )
     is_valid: bool = False
+    verification: VerificationResult | None = None
     ants_type: str | None = None
 
-    def verify(self, key_resolver: KeyResolver):
-        """Vérifie la signature si présente via un résolveur de clé (AC+cert)."""
+    def verify(
+        self,
+        key_resolver: KeyResolver | None,
+        *,
+        evaluation_date: date | None = None,
+        strict_tsl_freshness: bool = True,
+    ) -> VerificationResult:
+        """Vérifie la signature et la chaîne de confiance PKI du 2D-DOC.
+
+        Met à jour ``self.verification`` et ``self.is_valid`` puis retourne
+        le ``VerificationResult`` détaillé.
+        """
+        reference_date = self.header.signature_date or self.header.issue_date
+
+        tsl_seq: int | None = None
+        tsl_next: datetime | None = None
+        tsl_fresh = TrustListFreshness.UNKNOWN
+
+        if key_resolver is not None:
+            tsl_seq = getattr(key_resolver, "tsl_sequence_number", None)
+            tsl_next = getattr(key_resolver, "tsl_next_update", None)
+            get_freshness = getattr(key_resolver, "get_tsl_freshness", None)
+            if callable(get_freshness):
+                raw_freshness = get_freshness(evaluation_date=evaluation_date)
+                if isinstance(raw_freshness, TrustListFreshness):
+                    tsl_fresh = raw_freshness
+                elif isinstance(raw_freshness, str):
+                    try:
+                        tsl_fresh = TrustListFreshness(raw_freshness)
+                    except ValueError:
+                        tsl_fresh = TrustListFreshness.UNKNOWN
+
+        def _finish(
+            status: VerificationStatus, detail: str | None = None
+        ) -> VerificationResult:
+            result = VerificationResult(
+                status=status,
+                is_valid=(status == VerificationStatus.VERIFIED),
+                ca_id=self.header.ca_id,
+                cert_id=self.header.cert_id,
+                reference_date=reference_date,
+                tsl_sequence_number=tsl_seq,
+                tsl_next_update=tsl_next,
+                tsl_freshness=tsl_fresh,
+                detail=detail,
+            )
+            self.verification = result
+            self.is_valid = result.is_valid
+            return result
+
         if not self.signature.present or not self.signature.raw:
-            raise ValueError("Pas de signature présente dans ce 2D-DOC.")
-        pub = key_resolver.resolve(self.header.ca_id, self.header.cert_id)
-        self.is_valid = verify_signature(self.sign_payload, self.signature.raw, pub)
+            return _finish(
+                VerificationStatus.SIGNATURE_MISSING,
+                "Pas de signature présente dans ce 2D-DOC.",
+            )
+
+        if key_resolver is None:
+            return _finish(
+                VerificationStatus.RESOLVER_UNAVAILABLE,
+                "Magasin de confiance (KeyResolver) indisponible.",
+            )
+
+        unavailable_candidate_detail: str | None = None
+        try:
+            resolve_candidate_set_fn = getattr(
+                key_resolver, "resolve_candidate_set_for_verification", None
+            )
+            resolve_candidates_fn = getattr(
+                key_resolver, "resolve_candidates_for_verification", None
+            )
+            resolve_fn = getattr(key_resolver, "resolve_for_verification", None)
+            if callable(resolve_candidate_set_fn):
+                candidate_set = key_resolver.resolve_candidate_set_for_verification(
+                    self.header.ca_id,
+                    self.header.cert_id,
+                    reference_date=reference_date,
+                    evaluation_date=evaluation_date,
+                    tsl_eval_date=evaluation_date,
+                    strict_tsl_freshness=strict_tsl_freshness,
+                )
+                contexts = candidate_set.contexts
+                unavailable_candidate_detail = candidate_set.unavailable_detail
+                pubs = [ctx.leaf_cert.public_key() for ctx in contexts]
+            elif callable(resolve_candidates_fn):
+                contexts = key_resolver.resolve_candidates_for_verification(
+                    self.header.ca_id,
+                    self.header.cert_id,
+                    reference_date=reference_date,
+                    evaluation_date=evaluation_date,
+                    tsl_eval_date=evaluation_date,
+                    strict_tsl_freshness=strict_tsl_freshness,
+                )
+                pubs = [ctx.leaf_cert.public_key() for ctx in contexts]
+            elif callable(resolve_fn):
+                ctx = key_resolver.resolve_for_verification(
+                    self.header.ca_id,
+                    self.header.cert_id,
+                    reference_date=reference_date,
+                    evaluation_date=evaluation_date,
+                    tsl_eval_date=evaluation_date,
+                    strict_tsl_freshness=strict_tsl_freshness,
+                )
+                pubs = [ctx.leaf_cert.public_key()]
+            else:
+                pubs = [key_resolver.resolve(self.header.ca_id, self.header.cert_id)]
+        except TrustListExpiredError as exc:
+            return _finish(VerificationStatus.TRUST_LIST_EXPIRED, str(exc))
+        except UnknownCAError as exc:
+            return _finish(VerificationStatus.UNKNOWN_CA, str(exc))
+        except (UnknownCertificateError, KeyError) as exc:
+            return _finish(VerificationStatus.UNKNOWN_CERT, str(exc))
+        except UntrustedCertificateError as exc:
+            return _finish(VerificationStatus.UNTRUSTED_CERTIFICATE, str(exc))
+        except CertificateRevokedError as exc:
+            return _finish(VerificationStatus.CERT_REVOKED, str(exc))
+        except CertificateValidityError as exc:
+            return _finish(VerificationStatus.CERT_NOT_VALID_AT_SIGNING, str(exc))
+        except (ResolverUnavailableError, TrustSignatureError) as exc:
+            return _finish(VerificationStatus.RESOLVER_UNAVAILABLE, str(exc))
+
+        last_sig_err: Exception | None = None
+        for pub in pubs:
+            try:
+                if verify_signature(self.sign_payload, self.signature.raw, pub):
+                    return _finish(VerificationStatus.VERIFIED)
+            except (ValueError, TypeError, TwoDDocSignatureError) as exc:
+                last_sig_err = exc
+
+        if unavailable_candidate_detail is not None:
+            return _finish(
+                VerificationStatus.RESOLVER_UNAVAILABLE,
+                "Un candidat de signature ne peut pas être évalué faute de preuve de révocation applicable: "
+                + unavailable_candidate_detail,
+            )
+
+        if last_sig_err is not None:
+            return _finish(VerificationStatus.SIGNATURE_INVALID, str(last_sig_err))
+
+        return _finish(
+            VerificationStatus.SIGNATURE_INVALID,
+            "La signature cryptographique ne correspond pas aux données.",
+        )
