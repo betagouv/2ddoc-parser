@@ -3,6 +3,7 @@
 # - pre-push : scripts/gitleaks_pre_push.sh scanne les commits sortants
 #   (au push, l'index est vide, un scan --staged ne détecterait rien).
 default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -16,9 +17,10 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^src/fr_2ddoc_parser/crypto/keys/
       - id: end-of-file-fixer
+        exclude: ^src/fr_2ddoc_parser/crypto/keys/
       - id: check-yaml
-        args: [--unsafe]
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: debug-statements

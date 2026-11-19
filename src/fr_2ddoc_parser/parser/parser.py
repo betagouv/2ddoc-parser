@@ -72,8 +72,8 @@ def parse_header(data: str) -> Header:
     ver_str = data[2:4]
     try:
         ver = int(ver_str)
-    except ValueError:
-        raise TwoDDocFormatError(f"Version invalide: {ver_str!r}")
+    except ValueError as err:
+        raise TwoDDocFormatError(f"Version invalide: {ver_str!r}") from err
 
     if ver not in (2, 3, 4):
         raise TwoDDocUnsupportedVersion(
@@ -246,7 +246,7 @@ def parse(data: str) -> Decoded2DDoc:
         try:
             sig_raw = base64.b32decode(_b32_fixpad(sig_b32), casefold=True)
         except (binascii.Error, ValueError) as e:
-            raise TwoDDocFormatError(f"Signature Base32 invalide: {e}")
+            raise TwoDDocFormatError(f"Signature Base32 invalide: {e}") from e
         sig_block = SignatureBlock(present=True, b32=sig_b32, raw=sig_raw)
         if len(sig_raw) == 64:
             sig_block.alg_hint = "P-256"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Literal, cast
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -63,21 +63,23 @@ class AttestationActiviteProfessionnelle(BaseModel):
         date_fin = to_date_ddmmyyyy(f.get("56")) or to_date_hex(f.get("56"))
         date_naiss = to_date_ddmmyyyy(f.get("69")) or to_date_hex(f.get("69"))
 
-        return cls(
-            doc_type=cast(Literal["29"], d.header.doc_type),
-            siret_employeur=f.get("50"),
-            date_debut_contrat=cast(date, date_debut),
-            periode_declaration_contrat=f.get("5V"),
-            intitule_poste=f.get("5X"),
-            liste_prenoms=f.get("60"),
-            nom_patronymique=f.get("62"),
-            date_naissance=cast(date, date_naiss),
-            date_fin_contrat=date_fin,
-            denomination_sociale=f.get("5M"),
-            nature_contrat=f.get("5W"),
-            periode_remuneration=f.get("5Y"),
-            montant_remuneration=to_dec(f.get("5Z")),
-            extras=extras,
+        return cls.model_validate(
+            {
+                "doc_type": d.header.doc_type,
+                "siret_employeur": f.get("50"),
+                "date_debut_contrat": date_debut,
+                "periode_declaration_contrat": f.get("5V"),
+                "intitule_poste": f.get("5X"),
+                "liste_prenoms": f.get("60"),
+                "nom_patronymique": f.get("62"),
+                "date_naissance": date_naiss,
+                "date_fin_contrat": date_fin,
+                "denomination_sociale": f.get("5M"),
+                "nature_contrat": f.get("5W"),
+                "periode_remuneration": f.get("5Y"),
+                "montant_remuneration": to_dec(f.get("5Z")),
+                "extras": extras,
+            }
         )
 
     @property

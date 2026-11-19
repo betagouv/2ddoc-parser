@@ -2670,3 +2670,13 @@ def test_unrelated_legacy_resolution_does_not_contaminate_capture(synthetic_pki)
     assert invalid.verification is not None
     assert invalid.verification.status == VerificationStatus.SIGNATURE_INVALID
     assert _decode(clear, new_leaf_key).is_valid is True
+
+
+def test_packaged_tsl_xml_not_mutated_by_eof_newline():
+    """Vérifie que l'artefact signé tsl_signed.xml n'a pas de saut de ligne final parasite."""
+    tsl_path = (
+        Path(key_resolver_mod.__file__).resolve().parent / "keys" / "tsl_signed.xml"
+    )
+    tsl_bytes = tsl_path.read_bytes()
+    assert tsl_bytes.endswith(b"</tsl:TrustServiceStatusList>")
+    assert not tsl_bytes.endswith((b"\n", b"\r"))

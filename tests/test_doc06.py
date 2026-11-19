@@ -1,6 +1,9 @@
 from datetime import date
 from decimal import Decimal
 
+import pytest
+from pydantic import ValidationError
+
 from fr_2ddoc_parser.api import decode_2d_doc
 from fr_2ddoc_parser.type.doc06_bulletin_salaire import BulletinSalaire
 
@@ -36,3 +39,10 @@ def test_decode_bulletin_salaire():
     # Optional
     assert typed.nombre_heures_travaillees == Decimal("157.5")
     assert typed.cumul_heures_travaillees == Decimal("934.5")
+
+
+def test_decode_bulletin_salaire_missing_mandatory_field_raises_validation_error():
+    # Champ obligatoire 50 (siret_employeur) omis
+    raw_msg = "DC03FR00000112511636060110M/EXEMPLE/HENRY<GS>53123154124F5515032012581319,24<GS>599894,3<GS>"
+    with pytest.raises(ValidationError):
+        decode_2d_doc(raw_msg)

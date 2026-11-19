@@ -984,7 +984,7 @@ class KeyResolver:
                 "Aucun certificat feuille vérifié n'a pu être téléchargé."
             )
 
-        for issuer_key, (ca_id, ca_cert, ca_leaves) in issuer_groups.items():
+        for _issuer_key, (ca_id, ca_cert, ca_leaves) in issuer_groups.items():
             for crl_url in extract_crl_urls_from_certs(ca_leaves):
                 crl_bytes = _fetch_bytes(crl_url, timeout=timeout)
                 if not crl_bytes:

@@ -6,6 +6,9 @@ on:
       - main
       - develop
 
+permissions:
+  contents: read
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
@@ -32,6 +35,9 @@ jobs:
 
       - name: Run Ruff formatter check
         run: uv run ruff format --check .
+
+      - name: Run Pyright type checker
+        run: uv run pyright
 
       - name: Run tests
         run: uv run pytest tests/ -v --tb=short

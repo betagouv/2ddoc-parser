@@ -7,6 +7,7 @@ useDefault = true
 
 # ---------------------------------------------------------
 # 1. LISTE BLANCHE (Ce qu'on veut que Gitleaks ignore)
+# Note : les annotations de ligne `# gitleaks:allow` sont gérées nativement par Gitleaks v8.
 # ---------------------------------------------------------
 [allowlist]
 description = "Exclusions globales pour éviter les faux positifs"
@@ -16,11 +17,6 @@ paths = [
 
     # Fichier de lock uv (hashes SHA256 susceptibles de déclencher des faux positifs)
     '''(^|/)uv\.lock$''',
-]
-
-# Ignorer les annotations explicites directement dans le code
-regexes = [
-    '''gitleaks:allow''',
 ]
 
 # ---------------------------------------------------------
