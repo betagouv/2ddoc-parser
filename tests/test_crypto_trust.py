@@ -7,10 +7,10 @@ import io
 import urllib.error
 import urllib.request
 import warnings
-import xml.dom.minidom as minidom
 from http.client import HTTPMessage
 from pathlib import Path
 from typing import Any
+from xml.dom import minidom
 
 import lxml.etree as LET
 import pytest
@@ -447,8 +447,8 @@ def synthetic_pki():
     ants_root_cert = _build_ca_cert(
         "Autorité de Certification Services Applicatifs",
         ants_root_key,
-        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2035, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2035, 1, 1, tzinfo=dt.UTC),
     )
 
     tsl_signer_key = _make_rsa_key()
@@ -457,16 +457,16 @@ def synthetic_pki():
         tsl_signer_key,
         ants_root_cert,
         ants_root_key,
-        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2035, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2035, 1, 1, tzinfo=dt.UTC),
     )
 
     ca_key = _make_ec_key()
     ca_cert = _build_ca_cert(
         "FR06",
         ca_key,
-        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2032, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2032, 1, 1, tzinfo=dt.UTC),
     )
 
     leaf_key = _make_ec_key()
@@ -475,25 +475,25 @@ def synthetic_pki():
         leaf_key,
         ca_cert,
         ca_key,
-        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2024, 1, 1, tzinfo=dt.UTC),
         serial=1001,
     )
 
     tsl_bytes = _build_signed_tsl_xml(
-        ca_entries=[("FR06", ca_cert, dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc))],
+        ca_entries=[("FR06", ca_cert, dt.datetime(2020, 1, 1, tzinfo=dt.UTC))],
         signer_cert=tsl_signer_cert,
         signer_key=tsl_signer_key,
         sequence_number=42,
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
 
     crl = _build_crl(
         ca_cert,
         ca_key,
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
 
     return {
@@ -580,12 +580,12 @@ def test_self_signed_and_rogue_certificates_rejected(synthetic_pki):
         _build_ca_cert(
             "FPE2",
             attacker_key,
-            not_before=dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
-            not_after=dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
+            not_before=dt.datetime(2021, 1, 1, tzinfo=dt.UTC),
+            not_after=dt.datetime(2025, 1, 1, tzinfo=dt.UTC),
         ),
         attacker_key,
-        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2025, 1, 1, tzinfo=dt.UTC),
     )
 
     with pytest.raises(UntrustedCertificateError):
@@ -596,16 +596,16 @@ def test_self_signed_and_rogue_certificates_rejected(synthetic_pki):
     rogue_ca_cert = _build_ca_cert(
         "FR06",
         rogue_ca_key,
-        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2030, 1, 1, tzinfo=dt.UTC),
     )
     rogue_leaf = _build_leaf_cert(
         "FPE2",
         attacker_key,
         rogue_ca_cert,
         rogue_ca_key,
-        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2025, 1, 1, tzinfo=dt.UTC),
     )
 
     resolver = KeyResolver.from_tsl(
@@ -650,8 +650,8 @@ def test_forwarding_subclass_preserves_candidate_uncertainty(synthetic_pki):
     expired_old_crl = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.UTC),
     )
     resolver = ForwardingResolver.from_tsl(
         tsl,
@@ -697,8 +697,8 @@ def test_leaf_x509_constraints_enforced(synthetic_pki):
     ca_cert = synthetic_pki["ca_cert"]
     ca_key = synthetic_pki["ca_key"]
     key = _make_ec_key()
-    nb = dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc)
-    na = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    nb = dt.datetime(2021, 1, 1, tzinfo=dt.UTC)
+    na = dt.datetime(2024, 1, 1, tzinfo=dt.UTC)
 
     # BasicConstraints CA=True interdit sur feuille
     ca_flagged_leaf = _build_leaf_cert(
@@ -922,14 +922,14 @@ def test_validity_at_signing_date(synthetic_pki):
 def test_crl_revocation_and_crl_signature_verification(synthetic_pki):
     """Critère 9 : CRL signée, révocation après/à la date vs avant révocation vs compromission."""
     leaf_serial = synthetic_pki["leaf_cert"].serial_number
-    rev_dt = dt.datetime(2023, 6, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+    rev_dt = dt.datetime(2023, 6, 1, 12, 0, 0, tzinfo=dt.UTC)
 
     # CRL avec cessation_of_operation
     crl_cessation = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
         revoked_entries=[
             (leaf_serial, rev_dt, x509.ReasonFlags.cessation_of_operation)
         ],
@@ -975,8 +975,8 @@ def test_crl_revocation_and_crl_signature_verification(synthetic_pki):
     crl_compromise = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
         revoked_entries=[(leaf_serial, rev_dt, x509.ReasonFlags.key_compromise)],
     )
     resolver_comp = KeyResolver.from_tsl(
@@ -996,8 +996,8 @@ def test_crl_revocation_and_crl_signature_verification(synthetic_pki):
     rogue_crl = _build_crl(
         synthetic_pki["ca_cert"],
         _make_ec_key(),
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
     with pytest.raises(TrustSignatureError):
         resolver_cess.add_crl("FR06", rogue_crl)
@@ -1008,8 +1008,8 @@ def test_tsl_expiry_tampering_and_xml_security(synthetic_pki):
     crl = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2028, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2028, 5, 1, tzinfo=dt.UTC),
     )
     resolver = KeyResolver.from_tsl(
         synthetic_pki["tsl_bytes"],
@@ -1125,9 +1125,7 @@ def test_embedded_snapshot_loads_offline_and_enforces_revocations(monkeypatch):
     assert key_resolver_warnings == []
 
     assert resolver.tsl_sequence_number == 23
-    assert resolver.tsl_next_update == dt.datetime(
-        2027, 5, 11, 14, 0, 0, tzinfo=dt.timezone.utc
-    )
+    assert resolver.tsl_next_update == dt.datetime(2027, 5, 11, 14, 0, 0, tzinfo=dt.UTC)
     assert resolver.ca_ids == {"FR01", "FR03", "FR04", "FR05", "FR06", "FR07", "FR09"}
     assert "FR00" not in resolver.ca_ids
 
@@ -1162,8 +1160,8 @@ def test_tsl_xsw_unsigned_object_rejected(synthetic_pki):
     evil_ca_cert = _build_ca_cert(
         "FR99",
         evil_ca_key,
-        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2032, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2032, 1, 1, tzinfo=dt.UTC),
     )
     evil_b64 = base64.b64encode(evil_ca_cert.public_bytes(Encoding.DER)).decode("ascii")
     injected_tsp = (
@@ -1183,7 +1181,7 @@ def test_tsl_xsw_unsigned_object_rejected(synthetic_pki):
         "</tsl:ServiceInformation></tsl:TSPService></tsl:TSPServices>"
         "</tsl:TrustServiceProvider>"
         "</ds:Object>"
-    ).encode("utf-8")
+    ).encode()
 
     evil_tsl = synthetic_pki["tsl_bytes"].replace(
         b"</ds:Signature>", injected_tsp + b"</ds:Signature>"
@@ -1275,20 +1273,20 @@ def test_sync_trust_store_atomic_fail_closed(
     crl_der = synthetic_pki["crl"].public_bytes(Encoding.DER)
 
     tsl_v42 = _build_signed_tsl_xml(
-        ca_entries=[("FR06", ca_cert, dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc))],
+        ca_entries=[("FR06", ca_cert, dt.datetime(2020, 1, 1, tzinfo=dt.UTC))],
         signer_cert=synthetic_pki["tsl_signer_cert"],
         signer_key=synthetic_pki["tsl_signer_key"],
         sequence_number=42,
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
     tsl_v43 = _build_signed_tsl_xml(
-        ca_entries=[("FR06", ca_cert, dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc))],
+        ca_entries=[("FR06", ca_cert, dt.datetime(2020, 1, 1, tzinfo=dt.UTC))],
         signer_cert=synthetic_pki["tsl_signer_cert"],
         signer_key=synthetic_pki["tsl_signer_key"],
         sequence_number=43,
-        issue_dt=dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 6, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 6, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 6, 1, tzinfo=dt.UTC),
         tsp_uris={"FR06": "https://ca.example/fr06.der"},
     )
 
@@ -1352,8 +1350,8 @@ def test_certificate_rotation_same_cert_id_preserves_historical_verification(
         old_key,
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2024, 6, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2024, 6, 1, tzinfo=dt.UTC),
         serial=2001,
     )
 
@@ -1363,8 +1361,8 @@ def test_certificate_rotation_same_cert_id_preserves_historical_verification(
         new_key,
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        not_before=dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2027, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2024, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2027, 1, 1, tzinfo=dt.UTC),
         serial=2002,
     )
 
@@ -1437,12 +1435,12 @@ def test_certificate_rotation_same_cert_id_preserves_historical_verification(
     crl_new_revoked = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
         revoked_entries=[
             (
                 2002,
-                dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
+                dt.datetime(2025, 1, 1, tzinfo=dt.UTC),
                 x509.ReasonFlags.key_compromise,
             )
         ],
@@ -1541,7 +1539,7 @@ def test_strict_tsl_freshness_fails_closed_when_next_update_missing_or_direct_ca
         crls_by_ca=base_resolver._crls_by_ca,
         tsl_metadata=TslMetadata(
             sequence_number=42,
-            issue_date=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+            issue_date=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
             next_update=None,
             signer_cn="TSL0",
         ),
@@ -1623,14 +1621,14 @@ def test_from_trust_store_fails_closed_when_crls_missing(tmp_path: Path, synthet
             (
                 "FR06",
                 synthetic_pki["ca_cert"],
-                dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+                dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
             )
         ],
         signer_cert=synthetic_pki["tsl_signer_cert"],
         signer_key=synthetic_pki["tsl_signer_key"],
         sequence_number=50,
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
         tsp_uris={"FR06": "https://ca.example/fr06.der"},
     )
     leaf_der = synthetic_pki["leaf_cert"].public_bytes(Encoding.DER)
@@ -1660,8 +1658,8 @@ def test_ca_and_tsl_signer_x509_constraints_sec02(synthetic_pki):
     """SEC-02 : contraintes CA (BasicConstraints, keyCertSign, cRLSign) et signataire TSL (KeyUsage, AKI/SKI, dates)."""
     # 1) AC sans BasicConstraints ca=True ni keyCertSign / cRLSign
     fake_ca_key = _make_ec_key()
-    nb = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
-    na = dt.datetime(2032, 1, 1, tzinfo=dt.timezone.utc)
+    nb = dt.datetime(2020, 1, 1, tzinfo=dt.UTC)
+    na = dt.datetime(2032, 1, 1, tzinfo=dt.UTC)
 
     ca_no_bc = (
         x509.CertificateBuilder()
@@ -1697,8 +1695,8 @@ def test_ca_and_tsl_signer_x509_constraints_sec02(synthetic_pki):
         _make_ec_key(),
         ca_no_bc,
         fake_ca_key,
-        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2024, 1, 1, tzinfo=dt.UTC),
     )
     with pytest.raises(UntrustedCertificateError):
         validate_leaf_against_ca(leaf_under_fake, ca_no_bc)
@@ -1706,8 +1704,8 @@ def test_ca_and_tsl_signer_x509_constraints_sec02(synthetic_pki):
     crl_under_fake = _build_crl(
         ca_no_bc,
         fake_ca_key,
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
     with pytest.raises(TrustSignatureError):
         validate_crl_against_ca(crl_under_fake, ca_no_bc)
@@ -1733,8 +1731,8 @@ def test_ca_and_tsl_signer_x509_constraints_sec02(synthetic_pki):
         _make_ec_key(),
         ca_no_ku,
         fake_ca_key,
-        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2024, 1, 1, tzinfo=dt.UTC),
     )
     with pytest.raises(UntrustedCertificateError):
         validate_leaf_against_ca(leaf_no_ku_ca, ca_no_ku)
@@ -1742,8 +1740,8 @@ def test_ca_and_tsl_signer_x509_constraints_sec02(synthetic_pki):
     crl_no_ku_ca = _build_crl(
         ca_no_ku,
         fake_ca_key,
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
     with pytest.raises(TrustSignatureError):
         validate_crl_against_ca(crl_no_ku_ca, ca_no_ku)
@@ -1763,8 +1761,8 @@ def test_ca_and_tsl_signer_x509_constraints_sec02(synthetic_pki):
         ca_entries=[("FR06", synthetic_pki["ca_cert"], nb)],
         signer_cert=tsl_signer_no_ku,
         signer_key=tsl_signer_no_ku_key,
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
     with pytest.raises(TrustSignatureError):
         verify_tsl_xml_signature(tsl_bad_signer, synthetic_pki["ants_root_cert"])
@@ -1784,8 +1782,8 @@ def test_ca_and_tsl_signer_x509_constraints_sec02(synthetic_pki):
         ca_entries=[("FR06", synthetic_pki["ca_cert"], nb)],
         signer_cert=tsl_signer_bad_aki,
         signer_key=tsl_signer_bad_aki_key,
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
     with pytest.raises(TrustSignatureError):
         verify_tsl_xml_signature(tsl_bad_aki, synthetic_pki["ants_root_cert"])
@@ -1795,9 +1793,9 @@ def test_ca_and_tsl_signer_x509_constraints_sec02(synthetic_pki):
         ca_entries=[("FR06", synthetic_pki["ca_cert"], nb)],
         signer_cert=synthetic_pki["tsl_signer_cert"],
         signer_key=synthetic_pki["tsl_signer_key"],
-        issue_dt=dt.datetime(2040, 1, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2041, 1, 1, tzinfo=dt.timezone.utc),
-        signing_dt=dt.datetime(2040, 1, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2040, 1, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2041, 1, 1, tzinfo=dt.UTC),
+        signing_dt=dt.datetime(2040, 1, 1, tzinfo=dt.UTC),
     )
     with pytest.raises(TrustSignatureError):
         verify_tsl_xml_signature(tsl_expired_signer, synthetic_pki["ants_root_cert"])
@@ -1957,8 +1955,8 @@ def test_inclusive_c14n_and_naive_iso_datetimes_supported(synthetic_pki):
 
     meta = verify_tsl_xml_signature(tsl_inc, synthetic_pki["ants_root_cert"])
     assert meta.sequence_number == 77
-    assert meta.issue_date == dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc)
-    assert meta.next_update == dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc)
+    assert meta.issue_date == dt.datetime(2026, 5, 1, tzinfo=dt.UTC)
+    assert meta.next_update == dt.datetime(2027, 5, 1, tzinfo=dt.UTC)
 
     # from_tsl avec dates naïves (StatusStartingTime sans Z) ne doit pas lever TypeError lors du tri
     resolver = KeyResolver.from_tsl(
@@ -1977,12 +1975,12 @@ def test_expired_and_future_crls_make_verification_unavailable(synthetic_pki):
     )
     for last_update, next_update in [
         (
-            dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
-            dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+            dt.datetime(2022, 1, 1, tzinfo=dt.UTC),
+            dt.datetime(2022, 1, 2, tzinfo=dt.UTC),
         ),
         (
-            dt.datetime(2027, 1, 1, tzinfo=dt.timezone.utc),
-            dt.datetime(2027, 1, 2, tzinfo=dt.timezone.utc),
+            dt.datetime(2027, 1, 1, tzinfo=dt.UTC),
+            dt.datetime(2027, 1, 2, tzinfo=dt.UTC),
         ),
     ]:
         crl = _build_crl(
@@ -2025,13 +2023,13 @@ def test_from_network_fails_closed_when_crl_download_fails(monkeypatch, syntheti
             (
                 "FR06",
                 synthetic_pki["ca_cert"],
-                dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+                dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
             )
         ],
         signer_cert=synthetic_pki["tsl_signer_cert"],
         signer_key=synthetic_pki["tsl_signer_key"],
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
         tsp_uris={"FR06": "https://ca.example/fr06.der"},
     )
     leaf_der = synthetic_pki["leaf_cert"].public_bytes(Encoding.DER)
@@ -2091,12 +2089,12 @@ def test_unknown_critical_crl_entry_extension_rejects_entire_crl(synthetic_pki):
     crl = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
         revoked_entries=[
             (
                 987654321,
-                dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
+                dt.datetime(2021, 1, 1, tzinfo=dt.UTC),
                 x509.ReasonFlags.key_compromise,
             )
         ],
@@ -2111,8 +2109,8 @@ def test_unavailable_actual_signer_is_not_reported_as_signature_invalid(syntheti
     expired_old_crl = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.UTC),
     )
     resolver = KeyResolver.from_tsl(
         tsl,
@@ -2155,8 +2153,8 @@ def _build_rotated_issuer_fixture(synthetic_pki):
     new_ca_cert = _build_ca_cert(
         "FR06",
         new_ca_key,
-        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2032, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2032, 1, 1, tzinfo=dt.UTC),
     )
     new_leaf_key = _make_ec_key()
     new_leaf_cert = _build_leaf_cert(
@@ -2164,11 +2162,11 @@ def _build_rotated_issuer_fixture(synthetic_pki):
         new_leaf_key,
         new_ca_cert,
         new_ca_key,
-        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2027, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2021, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2027, 1, 1, tzinfo=dt.UTC),
         serial=4242,
     )
-    status_start = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+    status_start = dt.datetime(2020, 1, 1, tzinfo=dt.UTC)
     tsl = _build_signed_tsl_xml(
         ca_entries=[
             ("FR06", synthetic_pki["ca_cert"], status_start),
@@ -2176,18 +2174,18 @@ def _build_rotated_issuer_fixture(synthetic_pki):
         ],
         signer_cert=synthetic_pki["tsl_signer_cert"],
         signer_key=synthetic_pki["tsl_signer_key"],
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
     old_crl = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
         revoked_entries=[
             (
                 4242,
-                dt.datetime(2021, 6, 1, tzinfo=dt.timezone.utc),
+                dt.datetime(2021, 6, 1, tzinfo=dt.UTC),
                 x509.ReasonFlags.cessation_of_operation,
             )
         ],
@@ -2195,8 +2193,8 @@ def _build_rotated_issuer_fixture(synthetic_pki):
     new_crl = _build_crl(
         new_ca_cert,
         new_ca_key,
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
     return tsl, new_ca_cert, new_leaf_key, new_leaf_cert, old_crl, new_crl
 
@@ -2260,19 +2258,19 @@ def test_default_tsl_freshness_uses_current_instant(monkeypatch, synthetic_pki):
             (
                 "FR06",
                 synthetic_pki["ca_cert"],
-                dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+                dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
             )
         ],
         signer_cert=synthetic_pki["tsl_signer_cert"],
         signer_key=synthetic_pki["tsl_signer_key"],
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, 0, 0, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, 0, 0, tzinfo=dt.UTC),
     )
     crl = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2027, 5, 2, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2027, 5, 2, tzinfo=dt.UTC),
     )
     resolver = KeyResolver.from_tsl(
         tsl,
@@ -2291,7 +2289,7 @@ def test_default_tsl_freshness_uses_current_instant(monkeypatch, synthetic_pki):
     class _FrozenDateTime(dt.datetime):
         @classmethod
         def now(cls, tz=None):
-            value = cls(2027, 5, 1, 12, 0, tzinfo=dt.timezone.utc)
+            value = cls(2027, 5, 1, 12, 0, tzinfo=dt.UTC)
             return value if tz is not None else value.replace(tzinfo=None)
 
     monkeypatch.setattr(key_resolver_mod.dt, "datetime", _FrozenDateTime)
@@ -2344,13 +2342,13 @@ def _build_fixture_tsl(synthetic_pki, **kwargs) -> bytes:
             (
                 "FR06",
                 synthetic_pki["ca_cert"],
-                dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+                dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
             )
         ],
         signer_cert=synthetic_pki["tsl_signer_cert"],
         signer_key=synthetic_pki["tsl_signer_key"],
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
         **kwargs,
     )
 
@@ -2374,8 +2372,8 @@ def test_delta_restricted_and_unknown_critical_crls_are_rejected(synthetic_pki):
         crl = _build_crl(
             synthetic_pki["ca_cert"],
             synthetic_pki["ca_key"],
-            last_update=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-            next_update=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+            last_update=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+            next_update=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
             extra_extensions=[x509.Extension(value.oid, True, value)],
         )
         with pytest.raises(TrustSignatureError):
@@ -2389,8 +2387,8 @@ def test_unavailable_rotated_candidate_does_not_block_valid_candidate(synthetic_
     expired_old_crl = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.UTC),
     )
     resolver = KeyResolver.from_tsl(
         tsl,
@@ -2419,26 +2417,26 @@ def test_same_key_ca_renewal_preserves_historical_verification(synthetic_pki):
     renewed_ca_cert = _build_ca_cert(
         "FR06",
         synthetic_pki["ca_key"],
-        not_before=dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
-        not_after=dt.datetime(2035, 1, 1, tzinfo=dt.timezone.utc),
+        not_before=dt.datetime(2025, 1, 1, tzinfo=dt.UTC),
+        not_after=dt.datetime(2035, 1, 1, tzinfo=dt.UTC),
     )
     tsl = _build_signed_tsl_xml(
         ca_entries=[
             (
                 "FR06",
                 synthetic_pki["ca_cert"],
-                dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc),
+                dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
             ),
             (
                 "FR06",
                 renewed_ca_cert,
-                dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc),
+                dt.datetime(2025, 1, 1, tzinfo=dt.UTC),
             ),
         ],
         signer_cert=synthetic_pki["tsl_signer_cert"],
         signer_key=synthetic_pki["tsl_signer_key"],
-        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
-        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.timezone.utc),
+        issue_dt=dt.datetime(2026, 5, 1, tzinfo=dt.UTC),
+        next_update_dt=dt.datetime(2027, 5, 1, tzinfo=dt.UTC),
     )
     resolver = KeyResolver.from_tsl(
         tsl,
@@ -2630,8 +2628,8 @@ def test_unrelated_legacy_resolution_does_not_contaminate_capture(synthetic_pki)
     expired_old_crl = _build_crl(
         synthetic_pki["ca_cert"],
         synthetic_pki["ca_key"],
-        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.timezone.utc),
-        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.timezone.utc),
+        last_update=dt.datetime(2022, 1, 1, tzinfo=dt.UTC),
+        next_update=dt.datetime(2022, 1, 2, tzinfo=dt.UTC),
     )
 
     def _make_resolver(resolver_class: type[Any], include_old: bool) -> Any:

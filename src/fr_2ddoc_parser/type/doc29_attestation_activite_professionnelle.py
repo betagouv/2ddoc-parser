@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Dict, Literal, Optional, cast
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -30,14 +30,14 @@ class AttestationActiviteProfessionnelle(BaseModel):
     date_naissance: date  # 69
 
     # Champs facultatifs (F)
-    date_fin_contrat: Optional[date] = None  # 56
-    denomination_sociale: Optional[str] = None  # 5M
-    nature_contrat: Optional[str] = None  # 5W
-    periode_remuneration: Optional[str] = None  # 5Y
-    montant_remuneration: Optional[Decimal] = None  # 5Z
+    date_fin_contrat: date | None = None  # 56
+    denomination_sociale: str | None = None  # 5M
+    nature_contrat: str | None = None  # 5W
+    periode_remuneration: str | None = None  # 5Y
+    montant_remuneration: Decimal | None = None  # 5Z
 
     # Champs supplémentaires non cartographiés
-    extras: Dict[str, str] = Field(default_factory=dict)
+    extras: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
     def from_decoded(cls, d: Decoded2DDoc) -> AttestationActiviteProfessionnelle:
@@ -81,7 +81,7 @@ class AttestationActiviteProfessionnelle(BaseModel):
         )
 
     @property
-    def nom_complet_beneficiaire(self) -> Optional[str]:
+    def nom_complet_beneficiaire(self) -> str | None:
         if self.nom_patronymique and self.liste_prenoms:
             return f"{self.nom_patronymique} {self.liste_prenoms}".strip()
         return self.nom_patronymique

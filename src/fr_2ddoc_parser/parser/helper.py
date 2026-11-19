@@ -1,7 +1,7 @@
 # -----------------------------
 # Helpers de conversion
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 
 def to_int(s: str | None) -> int | None:
@@ -19,7 +19,7 @@ def to_dec(s: str | None) -> Decimal | None:
         return None
     try:
         return Decimal(s.replace(",", "."))
-    except Exception:
+    except InvalidOperation:
         return None
 
 

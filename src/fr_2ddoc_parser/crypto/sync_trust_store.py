@@ -170,7 +170,7 @@ def sync_trust_store(
                     continue
                 try:
                     crl = _load_crl_bytes(crl_bytes)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.warning("CRL illisible (%s / %s): %s", ca_id, crl_url, exc)
                     continue
 

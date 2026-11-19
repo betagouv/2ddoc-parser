@@ -8,7 +8,10 @@ from decimal import Decimal
 import pytest
 
 from fr_2ddoc_parser.api import decode_2d_doc
-from fr_2ddoc_parser.exception.exceptions import TwoDDocFormatError
+from fr_2ddoc_parser.exception.exceptions import (
+    TwoDDocFormatError,
+    TwoDDocUnsupportedVersion,
+)
 from fr_2ddoc_parser.type.doc04_avis_impots import AvisImpositionV1
 from fr_2ddoc_parser.type.doc28_avis_impots import AdresseImposition, AvisImposition
 
@@ -156,7 +159,7 @@ class TestAvisImpots:
         """Test qu'une version non supportée lève une erreur."""
         # DC05 n'existe pas (seulement DC04 est supporté)
         invalid = "DC05FR06FPE6FFFF24712801FR"
-        with pytest.raises(Exception):  # TwoDDocUnsupportedVersion
+        with pytest.raises(TwoDDocUnsupportedVersion):
             decode_2d_doc(invalid)
 
     def test_fields_extraction(self, sample_2d_doc):

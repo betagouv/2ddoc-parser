@@ -80,7 +80,7 @@ def decode_2d_doc(
     if resolver is None:
         try:
             resolver = get_default_key_resolver()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Magasin de confiance par défaut indisponible: %s", exc)
             resolver_error = str(exc)
 

@@ -5,11 +5,10 @@ import hashlib
 import hmac
 import re
 import warnings
-import xml.dom.minidom as minidom
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from typing import TypeVar
+from datetime import UTC, date, datetime
+from xml.dom import minidom
 from xml.parsers.expat import ExpatError
 
 import lxml.etree as LET
@@ -72,8 +71,6 @@ _COMPROMISE_REASONS = frozenset(
     }
 )
 
-_ExtensionT = TypeVar("_ExtensionT", bound=x509.ExtensionType)
-
 
 @dataclass(frozen=True)
 class TslMetadata:
@@ -85,9 +82,9 @@ class TslMetadata:
     signer_cn: str | None
 
 
-def _get_extension(
-    cert: x509.Certificate, ext_class: type[_ExtensionT]
-) -> _ExtensionT | None:
+def _get_extension[ExtensionT: x509.ExtensionType](
+    cert: x509.Certificate, ext_class: type[ExtensionT]
+) -> ExtensionT | None:
     """Lit une extension X.509 en filtrant l'avertissement RFC 5280 (>64 chars) de cryptography."""
     with warnings.catch_warnings():
         warnings.filterwarnings(
@@ -209,12 +206,12 @@ def _parse_iso_datetime(raw: str | None) -> datetime | None:
     if not text:
         return None
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _element_text(element: minidom.Element | None) -> str:
@@ -806,7 +803,7 @@ def is_crl_applicable(
         return False
     if evaluation_date is not None:
         return last_update.date() <= evaluation_date <= next_update.date()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return last_update <= now <= next_update
 
 
@@ -851,8 +848,8 @@ def check_certificate_revocation(
 
 def _to_utc_date(value: datetime) -> date:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc).date()
-    return value.astimezone(timezone.utc).date()
+        return value.replace(tzinfo=UTC).date()
+    return value.astimezone(UTC).date()
 
 
 def validate_certificate_dates(
