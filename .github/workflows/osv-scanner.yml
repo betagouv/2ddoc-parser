@@ -1,0 +1,141 @@
+# Contrôle opposable des vulnérabilités de dépendances et workflows GitHub Actions (Politique D7).
+#
+# Ce workflow est bloquant sur tous les événements (pull_request, merge_group,
+# push sur main/develop, schedule hebdomadaire et workflow_dispatch) :
+# 1. Toute nouvelle vulnérabilité non acceptée dans `uv.lock` ou les workflows
+#    GitHub Actions (`.github/workflows/*.yml`) bloque la CI.
+# 2. Toute exception dans `.osv-scanner.toml` doit être justifiée, attribuée
+#    (`[Owner: @...]`), datée (`YYYY-MM-DD` non quotée) et expirable (`ignoreUntil` <= 30 jours).
+# 3. Toute exception expirée ou mal formée bloque immédiatement la CI.
+# 4. Le rapport consolidé distingue explicitement les vulnérabilités distinctes
+#    (dédupliquées par graphe d'alias exacts CVE/GHSA/PYSEC) des occurrences de
+#    paquets dans `uv.lock` et des résultats bruts OSV.
+name: OSV-Scanner
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+  merge_group:
+  schedule:
+    - cron: "12 12 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  osv-scan:
+    name: OSV-Scanner & Politique D7
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Exécuter OSV-Scanner (uv.lock et workflows GitHub Actions)
+        id: scan
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@0a65f82af05cd58cf587827b0bb0489548c18346 # v2.7.0
+        with:
+          scan-args: |-
+            --output-file=osv-results.json
+            --format=json
+            --config=.osv-scanner.toml
+            --recursive
+            ./
+
+      - name: Vérifier la génération du rapport JSON OSV
+        id: check-scan-output
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -s osv-results.json ]; then
+            echo "json_ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "json_ready=false" >> "$GITHUB_OUTPUT"
+            if [ "${{ steps.scan.outcome }}" = "failure" ]; then
+              echo "::error::OSV-Scanner a échoué sans produire de fichier osv-results.json exploitable."
+              exit 1
+            fi
+          fi
+
+      - name: Générer le rapport SARIF (OSV Reporter)
+        id: reporter
+        if: ${{ !cancelled() && steps.check-scan-output.outputs.json_ready == 'true' && hashFiles('osv-results.json') != '' }}
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-reporter-action@0a65f82af05cd58cf587827b0bb0489548c18346 # v2.7.0
+        with:
+          scan-args: |-
+            --output-files=osv-results.sarif
+            --new=osv-results.json
+            --gh-annotations=false
+            --fail-on-vuln=true
+
+      - name: Vérifier la génération du rapport SARIF
+        id: check-sarif-output
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -s osv-results.sarif ]; then
+            echo "sarif_ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sarif_ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Évaluer la politique D7 et publier le résumé Markdown
+        id: policy
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          status=0
+          python3 scripts/check_vulnerability_policy.py \
+            --config .osv-scanner.toml \
+            --osv-json osv-results.json \
+            --summary-output vulnerability-summary.md || status=$?
+          if [ -f vulnerability-summary.md ]; then
+            cat vulnerability-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $status
+
+      - name: Archiver le rapport de vulnérabilités (JSON, Markdown, SARIF)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: osv-vulnerability-report
+          path: |
+            vulnerability-summary.md
+            osv-results.json
+            osv-results.sarif
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Publier le rapport SARIF dans GitHub Code Scanning
+        if: ${{ !cancelled() && steps.check-sarif-output.outputs.sarif_ready == 'true' && hashFiles('osv-results.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: osv-results.sarif
+          category: osv-scanner
+
+      - name: Appliquer le verdict bloquant (OSV-Scanner & Politique D7)
+        if: ${{ !cancelled() }}
+        run: |
+          if [ "${{ steps.check-scan-output.outcome }}" != "success" ] || \
+             [ "${{ steps.policy.outcome }}" != "success" ] || \
+             [ "${{ steps.reporter.outcome }}" != "success" ] || \
+             [ "${{ steps.scan.outcome }}" != "success" ]; then
+            echo "::error::Échec du contrôle opposable des vulnérabilités (scan=${{ steps.scan.outcome }}, check=${{ steps.check-scan-output.outcome }}, reporter=${{ steps.reporter.outcome }}, policy=${{ steps.policy.outcome }}). Consultez le résumé du job."
+            exit 1
+          fi
