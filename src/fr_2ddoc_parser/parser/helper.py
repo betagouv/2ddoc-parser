@@ -18,9 +18,10 @@ def to_dec(s: str | None) -> Decimal | None:
     if not s:
         return None
     try:
-        return Decimal(s.replace(",", "."))
+        value = Decimal(s.replace(",", "."))
     except InvalidOperation:
         return None
+    return value if value.is_finite() else None
 
 
 def to_date_ddmmyyyy(s: str | None) -> date | None:

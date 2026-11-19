@@ -13,9 +13,15 @@ Utilisez des modèles **Pydantic v2** (héritant de `BaseModel`) pour représent
 
 ```python
 from __future__ import annotations
+
 from datetime import date
-from typing import Optional, Dict, Literal
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+from fr_2ddoc_parser.model.models import Decoded2DDoc
+from fr_2ddoc_parser.parser.helper import to_date_ddmmyyyy
+from fr_2ddoc_parser.registry.registry import register
 
 
 class MonDocument(BaseModel):
@@ -28,28 +34,33 @@ class MonDocument(BaseModel):
     date_emission: date  # ID_CHAMP (O)
 
     # Champs facultatifs
-    numero: Optional[str] = None  # ID_CHAMP (F)
+    numero: str | None = None  # ID_CHAMP (F)
 
     # Champs supplémentaires non mappés
-    extras: Dict[str, str] = Field(default_factory=dict)
+    extras: dict[str, str] = Field(default_factory=dict)
 ```
 
 ### 3. Implémenter la logique de mapping
-Ajoutez une méthode `@classmethod from_decoded(cls, d: Decoded2DDoc)` et enregistrez le handler :
+Ajoutez une méthode `@classmethod from_decoded(cls, d: Decoded2DDoc)` en utilisant `cls.model_validate(...)` et enregistrez le handler :
 
 ```python
-from fr_2ddoc_parser.registry.registry import register
+    @classmethod
+    def from_decoded(cls, d: Decoded2DDoc) -> MonDocument:
+        f = d.fields
+        known = {"01", "02", "03"}
+        extras = {k: v for k, v in f.items() if k not in known}
+        # Mapping ID -> Attributs
+        # Utilisez les helpers : to_int, to_dec, to_date_ddmmyyyy, to_date_hex
+        return cls.model_validate(
+            {
+                "doc_type": d.header.doc_type,
+                "nom": f.get("01"),
+                "date_emission": to_date_ddmmyyyy(f.get("02")),
+                "numero": f.get("03"),
+                "extras": extras,
+            }
+        )
 
-@classmethod
-def from_decoded(cls, d: Decoded2DDoc) -> "MonDocument":
-    f = d.fields
-    # Mapping ID -> Attributs
-    # Utilisez les helpers : to_int, to_dec, to_date_ddmmyyyy
-    return cls(
-        doc_type=d.header.doc_type,
-        nom=f.get("XX"),
-        ...
-    )
 
 @register("XX", "nom_technique")
 def _handle_xx(doc: Decoded2DDoc) -> MonDocument:
@@ -71,6 +82,6 @@ uv run pytest tests/test_docXX.py
 ```
 
 ## 📜 Règles de codage
-- **Typage strict** : Utilisez les annotations de type Python.
-- **Pydantic v2** : Utilisez `BaseModel` et `Field`.
+- **Typage strict** : Utilisez les annotations de type Python (`str | None`, `dict[str, str]`).
+- **Pydantic v2** : Utilisez `BaseModel`, `Field` et `model_validate`.
 - **Nomenclature** : Utilisez des noms de variables explicites en français (proche de la spec ANTS).

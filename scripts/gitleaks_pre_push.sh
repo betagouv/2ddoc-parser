@@ -10,8 +10,9 @@
 
 set -euo pipefail
 
-CONFIG=".gitleaks.toml"
-BASELINE=".gitleaks-baseline.json"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+CONFIG="${REPO_ROOT}/.gitleaks.toml"
+BASELINE="${REPO_ROOT}/.gitleaks-baseline.json"
 ZERO_SHA="0000000000000000000000000000000000000000"
 
 if ! command -v gitleaks >/dev/null 2>&1; then

@@ -1,9 +1,11 @@
-# Contrôle opposable des vulnérabilités de dépendances et workflows GitHub Actions (Politique D7).
+# Contrôle opposable des vulnérabilités des dépendances Python (`uv.lock` — Politique D7).
 #
 # Ce workflow est bloquant sur tous les événements (pull_request, merge_group,
 # push sur main/develop, schedule hebdomadaire et workflow_dispatch) :
-# 1. Toute nouvelle vulnérabilité non acceptée dans `uv.lock` ou les workflows
-#    GitHub Actions (`.github/workflows/*.yml`) bloque la CI.
+# 1. Toute nouvelle vulnérabilité non acceptée dans `uv.lock` bloque la CI.
+#    (La sécurité des workflows GitHub Actions `.github/workflows/*.yml` est
+#    assurée en complément par Dependabot `github-actions`, CodeQL
+#    `Analyze (actions)` et le contrôle unitaire de SHA pinning + moindre privilège.)
 # 2. Toute exception dans `.osv-scanner.toml` doit être justifiée, attribuée
 #    (`[Owner: @...]`), datée (`YYYY-MM-DD` non quotée) et expirable (`ignoreUntil` <= 30 jours).
 # 3. Toute exception expirée ou mal formée bloque immédiatement la CI.
@@ -47,7 +49,7 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Exécuter OSV-Scanner (uv.lock et workflows GitHub Actions)
+      - name: Exécuter OSV-Scanner (uv.lock)
         id: scan
         continue-on-error: true
         uses: google/osv-scanner-action/osv-scanner-action@0a65f82af05cd58cf587827b0bb0489548c18346 # v2.7.0

@@ -246,3 +246,27 @@ def test_gitleaks_pre_push_url_remote_falls_back_to_local_sha(tmp_path: Path):
     )
     assert proc.returncode == 0, proc.stderr
     assert f"--log-opts={head_sha}" in log_file.read_text(encoding="utf-8").splitlines()
+
+
+def test_gitleaks_pre_push_resolves_config_from_subdirectory(tmp_path: Path):
+    """Non-régression QUAL-05 : le script résout `.gitleaks.toml` depuis `git rev-parse --show-toplevel` même lancé d'un sous-répertoire."""
+    repo, bin_dir, log_file, head_sha = _init_temp_repo(tmp_path)
+    subdir = repo / "nested" / "dir"
+    subdir.mkdir(parents=True)
+
+    proc = _run_hook(
+        subdir,
+        bin_dir,
+        "refs/heads/main",
+        head_sha,
+        "refs/heads/main",
+        ZERO_SHA,
+        "origin",
+    )
+    assert proc.returncode == 0, proc.stderr
+    called_args = log_file.read_text(encoding="utf-8").splitlines()
+    config_idx = called_args.index("--config")
+    assert (
+        Path(called_args[config_idx + 1]).resolve()
+        == (repo / ".gitleaks.toml").resolve()
+    )

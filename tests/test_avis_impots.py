@@ -183,6 +183,9 @@ class TestAvisImpots:
         assert to_dec("1,23") == Decimal("1.23")
         assert to_dec("abc") is None
         assert to_dec(None) is None
+        assert to_dec("NaN") is None
+        assert to_dec("-Infinity") is None
+        assert to_dec("Infinity") is None
 
     def test_fields_extraction(self, sample_2d_doc):
         """Test que les champs bruts sont extraits correctement."""
