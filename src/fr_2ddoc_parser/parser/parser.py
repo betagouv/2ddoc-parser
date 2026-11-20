@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import re
 from datetime import date, timedelta
 
@@ -71,8 +72,8 @@ def parse_header(data: str) -> Header:
     ver_str = data[2:4]
     try:
         ver = int(ver_str)
-    except ValueError:
-        raise TwoDDocFormatError(f"Version invalide: {ver_str!r}")
+    except ValueError as err:
+        raise TwoDDocFormatError(f"Version invalide: {ver_str!r}") from err
 
     if ver not in (2, 3, 4):
         raise TwoDDocUnsupportedVersion(
@@ -209,7 +210,7 @@ def parse_fields(payload: str) -> dict[str, str]:
             continue
         else:
             # longueur variable (bornée ou non)
-            val, i_new, truncated = _read_variable(payload, i, min_len, max_len)
+            val, i_new, _truncated = _read_variable(payload, i, min_len, max_len)
             # garde-fou minimal si la valeur est plus courte que min_len ET que
             # le flux n'a pas été arrêté par GS/RS/US (cas de chaînes mal formées)
             if len(val) < min_len and i_new < n and payload[i_new] not in (GS, RS, US):
@@ -244,8 +245,8 @@ def parse(data: str) -> Decoded2DDoc:
     if sig_b32:
         try:
             sig_raw = base64.b32decode(_b32_fixpad(sig_b32), casefold=True)
-        except Exception as e:
-            raise TwoDDocFormatError(f"Signature Base32 invalide: {e}")
+        except (binascii.Error, ValueError) as e:
+            raise TwoDDocFormatError(f"Signature Base32 invalide: {e}") from e
         sig_block = SignatureBlock(present=True, b32=sig_b32, raw=sig_raw)
         if len(sig_raw) == 64:
             sig_block.alg_hint = "P-256"

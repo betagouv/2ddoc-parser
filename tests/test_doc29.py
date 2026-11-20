@@ -1,6 +1,9 @@
 from datetime import date
 from decimal import Decimal
 
+import pytest
+from pydantic import ValidationError
+
 from fr_2ddoc_parser.api import decode_2d_doc
 from fr_2ddoc_parser.type.doc29_attestation_activite_professionnelle import (
     AttestationActiviteProfessionnelle,
@@ -56,3 +59,18 @@ def test_decode_attestation_activite_professionnelle():
 
     # Rémunération
     assert typed.montant_remuneration == Decimal("2500.00")
+
+
+def test_decode_attestation_missing_mandatory_field_raises_validation_error():
+    # Champ obligatoire 50 (siret_employeur) omis
+    raw_msg = (
+        "DC04FR06PND025ED25ED2901FR"
+        "62TESTNOM<GS>"
+        "60TESTPRENOM<GS>"
+        "6901011995"
+        "5V012025122025"
+        "5501092025"
+        "5XINGENIEUR LOGICIEL<GS>"
+    )
+    with pytest.raises(ValidationError):
+        decode_2d_doc(raw_msg)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Literal, cast
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -103,25 +103,27 @@ class BulletinSalaire(BaseModel):
         )
 
         # On laisse Pydantic lever une ValidationError si les champs obligatoires sont None ou invalides
-        return cls(
-            doc_type=cast(Literal["06"], d.header.doc_type),
-            beneficiaire=benef,
-            siret_employeur=f.get("50"),
-            debut_periode=to_date_hex(f.get("53")),
-            fin_periode=to_date_hex(f.get("54")),
-            debut_contrat=to_date_ddmmyyyy(f.get("55")),
-            salaire_net_imposable=to_dec(f.get("58")),
-            cumul_salaire_net_imposable=to_dec(f.get("59")),
-            nombre_heures_travaillees=to_dec(f.get("51")),
-            cumul_heures_travaillees=to_dec(f.get("52")),
-            date_signature_contrat=to_date_ddmmyyyy(f.get("57")),
-            salaire_brut_mensuel=to_dec(f.get("5A")),
-            denomination_sociale=f.get("5M"),
-            nom_employeur=f.get("5O"),
-            prenom_employeur=f.get("5P"),
-            type_contrat=type_contrat,
-            duree_contrat=f.get("5U"),
-            extras=extras,
+        return cls.model_validate(
+            {
+                "doc_type": d.header.doc_type,
+                "beneficiaire": benef,
+                "siret_employeur": f.get("50"),
+                "debut_periode": to_date_hex(f.get("53")),
+                "fin_periode": to_date_hex(f.get("54")),
+                "debut_contrat": to_date_ddmmyyyy(f.get("55")),
+                "salaire_net_imposable": to_dec(f.get("58")),
+                "cumul_salaire_net_imposable": to_dec(f.get("59")),
+                "nombre_heures_travaillees": to_dec(f.get("51")),
+                "cumul_heures_travaillees": to_dec(f.get("52")),
+                "date_signature_contrat": to_date_ddmmyyyy(f.get("57")),
+                "salaire_brut_mensuel": to_dec(f.get("5A")),
+                "denomination_sociale": f.get("5M"),
+                "nom_employeur": f.get("5O"),
+                "prenom_employeur": f.get("5P"),
+                "type_contrat": type_contrat,
+                "duree_contrat": f.get("5U"),
+                "extras": extras,
+            }
         )
 
     @property

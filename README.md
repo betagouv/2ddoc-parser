@@ -1,6 +1,6 @@
 # 2ddoc-parser
 
-[![Python Version](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python Version](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://www.python.org/downloads/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
 Bibliothèque Python pour décoder et vérifier les **2D-DOC** de l'ANTS (Agence Nationale des Titres Sécurisés).
@@ -261,6 +261,28 @@ Les contributions sont les bienvenues ! Consultez [CONTRIBUTING.md](CONTRIBUTING
 - Ajouter un nouveau type de document
 - Corriger un bug
 - Améliorer la documentation
+
+### Hooks Git (pre-commit)
+
+Installez les dépendances de développement et activez les hooks Git une fois par clone :
+
+```bash
+uv sync
+uv run pre-commit install
+```
+
+Deux étapes sont installées automatiquement :
+- **`pre-commit`** : formatage et lint Ruff (`ruff-check --fix`, `ruff-format`), contrôles de base (espaces en fin de ligne, YAML, conflits de fusion, fichiers volumineux, `debug-statements`), scan Gitleaks sur les fichiers stagés et mise à jour de `uv lock` lors d'une modification de `pyproject.toml`.
+- **`pre-push`** : scan Gitleaks des commits sortants via `scripts/gitleaks_pre_push.sh`.
+
+> [!NOTE]
+> Le hook `pre-push` requiert le binaire `gitleaks` (v8.30.1) dans le `PATH` (ex. `brew install gitleaks` sur macOS ou depuis les [releases GitHub](https://github.com/gitleaks/gitleaks/releases)). En son absence, le push est bloqué.
+
+Pour exécuter manuellement l'ensemble des hooks sur tous les fichiers :
+
+```bash
+uv run pre-commit run --all-files
+```
 
 ## 📄 Licence
 

@@ -1,0 +1,17 @@
+# Politique d'acceptation temporaire des vulnérabilités (Décision D7)
+#
+# Toute exception ajoutée dans ce fichier est contrôlée de manière bloquante en CI
+# par `scripts/check_vulnerability_policy.py`.
+#
+# Règles obligatoires pour chaque entrée `[[IgnoredVulns]]` :
+# 1. `id`          : Identifiant officiel (GHSA-xxxx-xxxx-xxxx, CVE-YYYY-NNNN..., ou PYSEC-YYYY-NNN).
+# 2. `ignoreUntil` : Date d'expiration obligatoire (YYYY-MM-DD non quotée), non échue et bornée à
+#                    30 jours maximum à compter de la date du contrôle.
+# 3. `reason`      : Format obligatoire :
+#                    "[Owner: @github_handle] Justification technique d'inapplicabilité ou mesure compensatoire (min. 20 caractères)"
+#
+# Exemple :
+# [[IgnoredVulns]]
+# id = "GHSA-0000-0000-0000"
+# ignoreUntil = 2026-12-15
+# reason = "[Owner: @nicolasSagon] Chemin de code non appelé par 2ddoc-parser ; attente du patch amont vX.Y.Z."

@@ -8,7 +8,12 @@ from decimal import Decimal
 import pytest
 
 from fr_2ddoc_parser.api import decode_2d_doc
-from fr_2ddoc_parser.exception.exceptions import TwoDDocFormatError
+from fr_2ddoc_parser.exception.exceptions import (
+    TwoDDocFormatError,
+    TwoDDocUnsupportedVersion,
+)
+from fr_2ddoc_parser.parser.helper import to_dec
+from fr_2ddoc_parser.parser.parser import parse
 from fr_2ddoc_parser.type.doc04_avis_impots import AvisImpositionV1
 from fr_2ddoc_parser.type.doc28_avis_impots import AdresseImposition, AvisImposition
 
@@ -156,8 +161,31 @@ class TestAvisImpots:
         """Test qu'une version non supportée lève une erreur."""
         # DC05 n'existe pas (seulement DC04 est supporté)
         invalid = "DC05FR06FPE6FFFF24712801FR"
-        with pytest.raises(Exception):  # TwoDDocUnsupportedVersion
+        with pytest.raises(TwoDDocUnsupportedVersion):
             decode_2d_doc(invalid)
+
+    @pytest.mark.parametrize("bad_signature", ["!!!INVALID!!!", "éééééééé"])
+    def test_parse_invalid_base32_signature_chains_cause(self, bad_signature: str):
+        """Une signature Base32 invalide ou non-ASCII lève TwoDDocFormatError avec __cause__."""
+        raw = f"DC04FR000001000F23DC2801FR432,75<GS><US>{bad_signature}"
+        with pytest.raises(TwoDDocFormatError) as exc_info:
+            parse(raw)
+        assert exc_info.value.__cause__ is not None
+
+    def test_parse_non_numeric_version_chains_cause(self):
+        """Une version non numérique lève TwoDDocFormatError chaînée depuis ValueError."""
+        with pytest.raises(TwoDDocFormatError) as exc_info:
+            parse("DCXXFR000001000F23DC2801FR")
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
+    def test_to_dec_edge_cases(self):
+        """Vérifie les cas limites de to_dec()."""
+        assert to_dec("1,23") == Decimal("1.23")
+        assert to_dec("abc") is None
+        assert to_dec(None) is None
+        assert to_dec("NaN") is None
+        assert to_dec("-Infinity") is None
+        assert to_dec("Infinity") is None
 
     def test_fields_extraction(self, sample_2d_doc):
         """Test que les champs bruts sont extraits correctement."""
