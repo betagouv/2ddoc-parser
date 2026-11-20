@@ -72,7 +72,8 @@ fi
 
 GITLEAKS_ARGS=(
   git
-  --log-opts="${RANGE}"
+  # Inclure les patchs des commits de fusion, omis par défaut par git log.
+  --log-opts="${RANGE} --diff-merges=first-parent"
   --config "${CONFIG}"
   --redact
   --verbose

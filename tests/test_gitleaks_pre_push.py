@@ -97,7 +97,7 @@ def test_gitleaks_pre_push_scans_orphan_branch_when_to_ref_empty(tmp_path: Path)
         "gitleaks aurait dû être invoqué sur une branche orpheline"
     )
     called_args = log_file.read_text(encoding="utf-8").splitlines()
-    assert f"--log-opts={head_sha}" in called_args
+    assert f"--log-opts={head_sha} --diff-merges=first-parent" in called_args
 
     # Avec un remote git connu : exclut uniquement les refs déjà présentes sur ce remote
     log_file.unlink()
@@ -115,7 +115,10 @@ def test_gitleaks_pre_push_scans_orphan_branch_when_to_ref_empty(tmp_path: Path)
     assert proc_with_remote.returncode == 0, proc_with_remote.stderr
     assert log_file.exists()
     called_args_remote = log_file.read_text(encoding="utf-8").splitlines()
-    assert f"--log-opts={head_sha} --not --remotes=origin" in called_args_remote
+    assert (
+        f"--log-opts={head_sha} --not --remotes=origin --diff-merges=first-parent"
+        in called_args_remote
+    )
 
 
 def test_gitleaks_pre_push_exits_zero_on_branch_deletion(tmp_path: Path):
@@ -209,7 +212,7 @@ def test_gitleaks_pre_push_normal_range_remote_to_local(tmp_path: Path):
     )
     assert proc_env.returncode == 0, proc_env.stderr
     assert (
-        f"--log-opts={first_sha}..{second_sha}"
+        f"--log-opts={first_sha}..{second_sha} --diff-merges=first-parent"
         in log_file.read_text(encoding="utf-8").splitlines()
     )
 
@@ -226,7 +229,7 @@ def test_gitleaks_pre_push_normal_range_remote_to_local(tmp_path: Path):
     )
     assert proc_args.returncode == 0, proc_args.stderr
     assert (
-        f"--log-opts={first_sha}..{second_sha}"
+        f"--log-opts={first_sha}..{second_sha} --diff-merges=first-parent"
         in log_file.read_text(encoding="utf-8").splitlines()
     )
 
@@ -245,7 +248,10 @@ def test_gitleaks_pre_push_url_remote_falls_back_to_local_sha(tmp_path: Path):
         "https://example.com/org/repo.git",
     )
     assert proc.returncode == 0, proc.stderr
-    assert f"--log-opts={head_sha}" in log_file.read_text(encoding="utf-8").splitlines()
+    assert (
+        f"--log-opts={head_sha} --diff-merges=first-parent"
+        in log_file.read_text(encoding="utf-8").splitlines()
+    )
 
 
 def test_gitleaks_pre_push_resolves_config_from_subdirectory(tmp_path: Path):
@@ -270,3 +276,74 @@ def test_gitleaks_pre_push_resolves_config_from_subdirectory(tmp_path: Path):
         Path(called_args[config_idx + 1]).resolve()
         == (repo / ".gitleaks.toml").resolve()
     )
+
+
+def test_gitleaks_pre_push_scans_merge_only_changes(tmp_path: Path):
+    """Le scan doit transmettre à Gitleaks les patchs des fusions sans abandonner l'historique des branches."""
+    repo, bin_dir, log_file, _ = _init_temp_repo(tmp_path)
+
+    _git(repo, "checkout", "-b", "side")
+    (repo / "side.txt").write_text("clean side change\n", encoding="utf-8")
+    _git(repo, "add", "side.txt")
+    _git(repo, "commit", "-m", "clean side change")
+    side_sha = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "checkout", "main")
+    (repo / "main.txt").write_text("clean main change\n", encoding="utf-8")
+    _git(repo, "add", "main.txt")
+    _git(repo, "commit", "-m", "clean main change")
+    pre_merge_sha = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "merge", "--no-commit", "--no-ff", "side")
+    synthetic_token = "dia_" + "prod_v1_" + "SYNTHETIC_MERGE_ONLY_TOKEN"
+    (repo / "merge_only.txt").write_text(f"{synthetic_token}\n", encoding="utf-8")
+    _git(repo, "add", "merge_only.txt", "side.txt")
+    _git(repo, "commit", "-m", "merge side with merge-only token")
+    merge_sha = _git(repo, "rev-parse", "HEAD")
+    assert len(_git(repo, "show", "-s", "--format=%P", merge_sha).split()) == 2
+
+    scan_range = f"{pre_merge_sha}..{merge_sha}"
+    default_git_log = _git(repo, "log", "-p", "-U0", scan_range)
+    assert synthetic_token not in default_git_log
+    assert f"commit {side_sha}" in default_git_log
+
+    git_log_input = tmp_path / "git-log-input.txt"
+    stub = bin_dir / "gitleaks"
+    stub.write_text(
+        f'''#!/usr/bin/env python3
+import pathlib
+import subprocess
+import sys
+
+pathlib.Path("{log_file}").write_text("\\n".join(sys.argv[1:]) + "\\n", encoding="utf-8")
+log_opts = next(
+    arg.removeprefix("--log-opts=")
+    for arg in sys.argv[1:]
+    if arg.startswith("--log-opts=")
+)
+with pathlib.Path("{git_log_input}").open("w", encoding="utf-8") as output:
+    subprocess.run(
+        ["git", "log", "-p", "-U0", *log_opts.split(" ")],
+        check=True,
+        stdout=output,
+    )
+''',
+        encoding="utf-8",
+    )
+
+    proc = _run_hook(
+        repo,
+        bin_dir,
+        "refs/heads/main",
+        merge_sha,
+        "refs/heads/main",
+        pre_merge_sha,
+        "origin",
+    )
+    assert proc.returncode == 0, proc.stderr
+    scanned_git_log = git_log_input.read_text(encoding="utf-8")
+    assert synthetic_token in scanned_git_log
+    assert f"commit {side_sha}" in scanned_git_log
+
+    called_args = log_file.read_text(encoding="utf-8").splitlines()
+    assert f"--log-opts={scan_range} --diff-merges=first-parent" in called_args
