@@ -179,3 +179,19 @@ if result.verification is not None:
         result.verification.detail,
     )
 ```
+
+### Explicit In-Memory CRL Refresh (Read-Only Containers)
+
+While the bundled TSL remains valid for several months, ANTS CA CRLs typically carry short validity windows (**3 to 7 days**). Because `decode_2d_doc()` is strictly offline and fail-closed, expired CRLs yield `VerificationStatus.RESOLVER_UNAVAILABLE` until refreshed.
+
+For read-only filesystems or hardened containers where disk writes are undesirable, integrators can explicitly refresh CRLs **in memory** using `refresh_default_crls()` or `KeyResolver.refresh_crls()`:
+
+- **Zero implicit network I/O**: No outbound call is ever triggered at import time or during `decode_2d_doc()`.
+- **Cryptographic & SSRF hardening**: CRLs are fetched only from the validated leaf certificates' `CRLDistributionPoints` via `_fetch_bytes()` (SSRF/redirect protections, 10 MiB cap, timeout), verified against the exact issuing CA certificate (`validate_crl_against_ca`), and checked for applicability (`is_crl_applicable`) before atomic replacement under `KeyResolver._crl_lock`.
+- **Per-CA failure isolation**: A failure on one CA (e.g. legacy `FR01` or transient network outage) is recorded in `CrlRefreshResult.failed_cas` without raising an exception, without blocking other CAs, and without ever evicting an already-fresh CRL.
+- **Freshness inspection**: `KeyResolver.get_expired_crl_cas(refresh_margin=...)` and `KeyResolver.has_expired_crls(refresh_margin=...)` expose current CRL freshness for startup checks and monitoring.
+
+Integrators are responsible for orchestrating `refresh_default_crls()` across three recommended touchpoints:
+1. **At application/worker boot**.
+2. **Periodically in a background task** (e.g. every 6–12 hours with `refresh_margin=timedelta(hours=24)`).
+3. **As an on-demand fallback** on `VerificationStatus.RESOLVER_UNAVAILABLE`, scoped to `ca_ids=[result.header.ca_id]` and guarded by an integrator-side per-CA cooldown.
