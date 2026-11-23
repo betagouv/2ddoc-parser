@@ -470,6 +470,14 @@ def extract_crl_urls_from_certs(certs: Sequence[x509.Certificate]) -> list[str]:
     return list(dict.fromkeys(urls))
 
 
+def _get_crl_number(crl: x509.CertificateRevocationList) -> int | None:
+    """Retourne le numéro de séquence de la CRL, s'il est présent."""
+    try:
+        return crl.extensions.get_extension_for_class(x509.CRLNumber).value.crl_number
+    except x509.ExtensionNotFound:
+        return None
+
+
 def _is_crl_fresh_with_margin(
     crl: x509.CertificateRevocationList,
     *,
@@ -690,12 +698,24 @@ class KeyResolver:
         with self._crl_lock:
             previous = self._crls_by_issuer.get(issuer_key, [])
             last_update = crl.last_update_utc
-            if last_update is not None and any(
-                existing.last_update_utc is not None
-                and existing.last_update_utc > last_update
-                for existing in previous
-            ):
-                return False
+            crl_number = _get_crl_number(crl)
+            for existing in previous:
+                existing_last_update = existing.last_update_utc
+                if (
+                    last_update is None
+                    or existing_last_update is None
+                    or existing_last_update < last_update
+                ):
+                    continue
+                if existing_last_update > last_update:
+                    return False
+                existing_crl_number = _get_crl_number(existing)
+                if (
+                    crl_number is not None
+                    and existing_crl_number is not None
+                    and existing_crl_number > crl_number
+                ):
+                    return False
             self._crls_by_issuer[issuer_key] = [crl]
             previous_ids = {id(old) for old in previous}
             still_referenced = {
@@ -874,6 +894,15 @@ class KeyResolver:
                         last_reason = "invalid_crl_signature"
                         logger.warning(
                             "CRL rejetée par validation PKI (%s/%s): %s",
+                            ca_id,
+                            issuer_key[:12],
+                            exc,
+                        )
+                        continue
+                    except ValueError as exc:
+                        last_reason = "invalid_crl_format"
+                        logger.warning(
+                            "CRL avec contenu ASN.1 illisible ignorée (%s/%s): %s",
                             ca_id,
                             issuer_key[:12],
                             exc,

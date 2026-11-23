@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.serialization import Encoding
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtensionOID, NameOID
 
 from fr_2ddoc_parser.api import (
     CrlRefreshResult,
@@ -178,6 +178,7 @@ def _build_crl(
     last_update: dt.datetime,
     next_update: dt.datetime,
     revoked_serials: list[tuple[int, dt.datetime]] | None = None,
+    crl_number: int | None = None,
 ) -> x509.CertificateRevocationList:
     builder = (
         x509.CertificateRevocationListBuilder()
@@ -185,6 +186,8 @@ def _build_crl(
         .last_update(last_update)
         .next_update(next_update)
     )
+    if crl_number is not None:
+        builder = builder.add_extension(x509.CRLNumber(crl_number), critical=False)
     for serial, rev_dt in revoked_serials or []:
         builder = builder.add_revoked_certificate(
             x509.RevokedCertificateBuilder()
@@ -1031,6 +1034,163 @@ def test_concurrent_refresh_does_not_replace_newer_crl_with_older(
     decoded = decode_2d_doc(raw_doc, key_resolver=resolver)
     assert decoded.verification is not None
     assert decoded.verification.status == VerificationStatus.CERT_REVOKED
+
+
+def test_equal_timestamp_refresh_orders_crls_by_crl_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = dt.datetime.now(dt.UTC)
+    ca_key, ca_cert = _build_ca(
+        "CA FR06",
+        not_before=now - dt.timedelta(days=365),
+        not_after=now + dt.timedelta(days=365),
+    )
+    crl_url = "https://crl.example.gouv.fr/fr06.crl"
+    leaf_key, leaf_cert = _build_leaf(
+        "FPE2",
+        ca_cert,
+        ca_key,
+        not_before=now - dt.timedelta(days=30),
+        not_after=now + dt.timedelta(days=365),
+        crl_urls=[crl_url],
+    )
+    crl_kwargs = {
+        "last_update": now - dt.timedelta(hours=1),
+        "next_update": now + dt.timedelta(days=5),
+    }
+    older_crl = _build_crl(ca_cert, ca_key, **crl_kwargs, crl_number=10)
+    newer_crl = _build_crl(
+        ca_cert,
+        ca_key,
+        **crl_kwargs,
+        crl_number=11,
+        revoked_serials=[(leaf_cert.serial_number, now - dt.timedelta(minutes=30))],
+    )
+    latest_crl = _build_crl(ca_cert, ca_key, **crl_kwargs, crl_number=12)
+    resolver = _make_resolver(
+        ca_specs={"FR06": (ca_cert, leaf_cert, newer_crl)},
+        tsl_next_update=now + dt.timedelta(days=180),
+    )
+    raw_doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=now.date(),
+        signature_date=now.date(),
+        private_key=leaf_key,
+    )
+
+    before = decode_2d_doc(raw_doc, key_resolver=resolver)
+    assert before.verification is not None
+    assert before.verification.status == VerificationStatus.CERT_REVOKED
+
+    monkeypatch.setattr(
+        key_resolver_mod,
+        "_fetch_bytes",
+        lambda url, timeout=10: older_crl.public_bytes(Encoding.DER),
+    )
+    older_result = resolver.refresh_crls(only_expired=False)
+    assert older_result.refreshed_cas == ()
+    after_older = decode_2d_doc(raw_doc, key_resolver=resolver)
+    assert after_older.verification is not None
+    assert after_older.verification.status == VerificationStatus.CERT_REVOKED
+
+    issuer_key = key_resolver_mod._cert_fingerprint(ca_cert)
+    stored_crl = resolver._crls_by_issuer[issuer_key][0]
+    stored_number = stored_crl.extensions.get_extension_for_class(
+        x509.CRLNumber
+    ).value.crl_number
+    assert stored_number == 11
+
+    monkeypatch.setattr(
+        key_resolver_mod,
+        "_fetch_bytes",
+        lambda url, timeout=10: latest_crl.public_bytes(Encoding.DER),
+    )
+    latest_result = resolver.refresh_crls(only_expired=False)
+    assert latest_result.refreshed_cas == ("FR06",)
+    stored_crl = resolver._crls_by_issuer[issuer_key][0]
+    stored_number = stored_crl.extensions.get_extension_for_class(
+        x509.CRLNumber
+    ).value.crl_number
+    assert stored_number == 12
+
+
+def test_malformed_crl_extensions_fall_back_and_isolate_ca(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = dt.datetime.now(dt.UTC)
+    ca_specs = {}
+    payloads: dict[str, bytes] = {}
+    expected_calls: list[str] = []
+
+    for ca_id, cert_id in (("FR01", "A001"), ("FR06", "FPE2")):
+        ca_key, ca_cert = _build_ca(
+            f"CA {ca_id}",
+            not_before=now - dt.timedelta(days=365),
+            not_after=now + dt.timedelta(days=365),
+        )
+        bad_url = f"https://crl1.example.gouv.fr/{ca_id}.crl"
+        good_url = f"https://crl2.example.gouv.fr/{ca_id}.crl"
+        crl_urls = [bad_url, good_url] if ca_id == "FR01" else [good_url]
+        _, leaf_cert = _build_leaf(
+            cert_id,
+            ca_cert,
+            ca_key,
+            not_before=now - dt.timedelta(days=30),
+            not_after=now + dt.timedelta(days=365),
+            crl_urls=crl_urls,
+        )
+        expired_crl = _build_crl(
+            ca_cert,
+            ca_key,
+            last_update=now - dt.timedelta(days=10),
+            next_update=now - dt.timedelta(days=2),
+        )
+        ca_specs[ca_id] = (ca_cert, leaf_cert, expired_crl)
+
+        fresh_crl = _build_crl(
+            ca_cert,
+            ca_key,
+            last_update=now - dt.timedelta(hours=1),
+            next_update=now + dt.timedelta(days=5),
+        )
+        payloads[good_url] = fresh_crl.public_bytes(Encoding.DER)
+        if ca_id == "FR01":
+            malformed_crl = (
+                x509.CertificateRevocationListBuilder()
+                .issuer_name(ca_cert.subject)
+                .last_update(now - dt.timedelta(hours=1))
+                .next_update(now + dt.timedelta(days=5))
+                .add_extension(
+                    x509.UnrecognizedExtension(
+                        ExtensionOID.CRL_NUMBER, b"not-an-integer"
+                    ),
+                    critical=False,
+                )
+                .sign(ca_key, hashes.SHA256())
+            )
+            payloads[bad_url] = malformed_crl.public_bytes(Encoding.DER)
+            expected_calls.extend([bad_url, good_url])
+        else:
+            expected_calls.append(good_url)
+
+    resolver = _make_resolver(
+        ca_specs=ca_specs,
+        tsl_next_update=now + dt.timedelta(days=180),
+    )
+    calls: list[str] = []
+
+    def fake_fetch(url: str, timeout: int = 10) -> bytes:
+        calls.append(url)
+        return payloads[url]
+
+    monkeypatch.setattr(key_resolver_mod, "_fetch_bytes", fake_fetch)
+    result = resolver.refresh_crls()
+
+    assert calls == expected_calls
+    assert result.refreshed_cas == ("FR01", "FR06")
+    assert result.failed_cas == {}
+    assert result.expired_cas == ()
 
 
 def test_crl_refresh_result_is_frozen_and_validates_arguments() -> None:
