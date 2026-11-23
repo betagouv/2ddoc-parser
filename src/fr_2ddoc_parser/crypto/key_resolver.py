@@ -141,16 +141,18 @@ def _parse_any_certs(data: bytes) -> list[x509.Certificate]:
     for block in PEM_RE.findall(data):
         try:
             found.append(x509.load_pem_x509_certificate(block))
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Bloc PEM invalide ignoré: %s", exc)
     if found:
         return found
 
     try:
         found.append(x509.load_der_x509_certificate(data))
         return found
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "Chargement DER direct impossible, bascule sur scan binaire: %s", exc
+        )
 
     return _scan_der_certs(data)
 
@@ -163,7 +165,7 @@ def _is_safe_http_url(url: str) -> urllib.parse.ParseResult | None:
     host = parsed.hostname.strip().lower().rstrip(".")
     if not host or host in {"localhost", "ip6-localhost", "localhost.localdomain"}:
         return None
-    if host.endswith(".localhost") or host.endswith(".local"):
+    if host.endswith((".localhost", ".local")):
         return None
 
     ip_candidate = host.split("%", 1)[0]
@@ -242,7 +244,7 @@ def _fetch_bytes(url: str, timeout: int = 10) -> bytes | None:
                     )
                     return None
                 return data
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Échec téléchargement %s: %s", candidate, exc)
     return None
 
@@ -405,7 +407,7 @@ def _parse_tsl_bytes(
                 try:
                     der = base64.b64decode(b64, validate=True)
                     cert = x509.load_der_x509_certificate(der)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.debug(
                         "Certificat X.509 TSL invalide ignoré pour %s: %s", ca_id, exc
                     )
@@ -446,7 +448,7 @@ def _load_packaged_root_ca() -> x509.Certificate:
 def _load_crl_bytes(data: bytes) -> x509.CertificateRevocationList:
     try:
         return x509.load_der_x509_crl(data)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return x509.load_pem_x509_crl(data)
 
 
@@ -561,11 +563,9 @@ class KeyResolver:
                 if evaluation_date > next_upd.date()
                 else TrustListFreshness.FRESH
             )
-        now_utc = dt.datetime.now(dt.timezone.utc)
+        now_utc = dt.datetime.now(dt.UTC)
         aware_next = (
-            next_upd
-            if next_upd.tzinfo is not None
-            else next_upd.replace(tzinfo=dt.timezone.utc)
+            next_upd if next_upd.tzinfo is not None else next_upd.replace(tzinfo=dt.UTC)
         )
         return (
             TrustListFreshness.STALE
@@ -674,7 +674,7 @@ class KeyResolver:
         """Exige une CRL pour chaque émetteur retenu, courante si demandé."""
         missing: list[str] = []
         not_current: list[str] = []
-        for (ca_id, issuer_key), ca_cert in self._active_issuer_certificates().items():
+        for ca_id, issuer_key in self._active_issuer_certificates():
             crls = self._crls_by_issuer.get(issuer_key, ())
             if not crls:
                 missing.append(f"{ca_id}/{issuer_key[:12]}")
@@ -732,7 +732,7 @@ class KeyResolver:
         recs.sort(
             key=lambda r: (
                 r.ca_id,
-                r.status_start or dt.datetime.min.replace(tzinfo=dt.timezone.utc),
+                r.status_start or dt.datetime.min.replace(tzinfo=dt.UTC),
             ),
             reverse=True,
         )
@@ -834,7 +834,7 @@ class KeyResolver:
         try:
             leaves_dir = resolved_dir.joinpath("trusted_leaves")
             has_leaves_dir = leaves_dir.is_dir()
-        except Exception:
+        except Exception:  # noqa: BLE001
             leaves_dir = None
             has_leaves_dir = False
 
@@ -870,7 +870,7 @@ class KeyResolver:
         try:
             single_bundle = resolved_dir.joinpath("trusted_leaves.pem")
             has_single = single_bundle.is_file()
-        except Exception:
+        except Exception:  # noqa: BLE001
             single_bundle = None
             has_single = False
 
@@ -905,7 +905,7 @@ class KeyResolver:
         try:
             crls_dir = resolved_dir.joinpath("crls")
             has_crls_dir = crls_dir.is_dir()
-        except Exception:
+        except Exception:  # noqa: BLE001
             crls_dir = None
             has_crls_dir = False
 
@@ -984,7 +984,7 @@ class KeyResolver:
                 "Aucun certificat feuille vérifié n'a pu être téléchargé."
             )
 
-        for issuer_key, (ca_id, ca_cert, ca_leaves) in issuer_groups.items():
+        for _issuer_key, (ca_id, ca_cert, ca_leaves) in issuer_groups.items():
             for crl_url in extract_crl_urls_from_certs(ca_leaves):
                 crl_bytes = _fetch_bytes(crl_url, timeout=timeout)
                 if not crl_bytes:
@@ -1043,7 +1043,7 @@ class KeyResolver:
         strict_tsl_freshness: bool = True,
     ) -> VerifiedCandidateSet:
         """Résout les candidats et conserve toute indisponibilité concurrente."""
-        effective_eval_date = evaluation_date or dt.datetime.now(dt.timezone.utc).date()
+        effective_eval_date = evaluation_date or dt.datetime.now(dt.UTC).date()
         effective_tsl_eval = (
             tsl_eval_date if tsl_eval_date is not None else evaluation_date
         )

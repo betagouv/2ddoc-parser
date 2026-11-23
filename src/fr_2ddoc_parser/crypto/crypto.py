@@ -48,7 +48,7 @@ def verify_signature(
             der = _rs_concat_to_der(signature_bytes)
             public_key.verify(der, payload, ec.ECDSA(digest))
             return True
-        except (InvalidSignature, ValueError):
+        except InvalidSignature, ValueError:
             return False
 
     # RSA (PKCS#1 v1.5)

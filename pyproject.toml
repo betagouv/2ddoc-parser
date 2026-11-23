@@ -1,26 +1,25 @@
 [project]
 name = "2ddoc_parser"
 version = "1.0.6"
-description = "Api pour décodé et vérifier les 2D docs de l'ANTS"
+description = "Api pour décoder et vérifier les 2D docs de l'ANTS"
 authors = [
     { name = "Nicolas Sagon", email = "nicolas.sagon@beta.gouv.fr" }
 ]
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
-    "cryptography>=45.0.1",
-    "lxml>=5.3.0",
-    "typing-extensions>=4.12.2",
-    "pydantic>=2.12.4",
+    "cryptography>=50.0.2",
+    "lxml>=6.1.3",
+    "pydantic>=2.14.3",
 ]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.12.11",
-    "pytest>=8.4.1",
-    "pre-commit>=3.6.0",
-    "pyright>=1.1.408",
+    "ruff>=0.17.5",
+    "pytest>=9.2.0",
+    "pre-commit>=4.7.0",
+    "pyright>=1.1.414",
 ]
 
 [build-system]
@@ -31,12 +30,12 @@ build-backend = "hatchling.build"
 packages = ["src/fr_2ddoc_parser"]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
-ignore = ["E501"]
+select = ["E", "F", "I", "UP", "B", "BLE", "RUF100"]
+ignore = ["E501", "UP042"]
 
 [tool.ruff.format]
 quote-style = "double"

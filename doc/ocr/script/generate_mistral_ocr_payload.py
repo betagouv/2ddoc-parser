@@ -82,7 +82,7 @@ def main():
             )
         else:
             print(json_output)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Erreur : {e}", file=sys.stderr)
         sys.exit(1)
 

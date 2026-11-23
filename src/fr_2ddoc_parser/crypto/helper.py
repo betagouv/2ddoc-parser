@@ -50,7 +50,7 @@ def _scan_der_certs(data: bytes) -> list[x509.Certificate]:
                 seen.add(fp)
             i += total
             continue
-        except Exception:
+        except Exception:  # noqa: BLE001
             # faux positif → on avance d’un octet et on réessaie
             i += 1
             continue
