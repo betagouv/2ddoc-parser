@@ -213,6 +213,99 @@ cert_ids = resolver.available_cert_ids("FR06")
 uv run python -m fr_2ddoc_parser.crypto.sync_trust_store
 ```
 
+### 🔄 Rafraîchissement des CRLs en mémoire (production & conteneurs read-only)
+
+La **TSL embarquée** dans le package reste valide plusieurs mois, mais les **CRLs (listes de révocation)** publiées par les autorités de certification ANTS ont une durée de validité très courte (**3 à 7 jours** selon l'AC : par exemple ~3 jours pour `FR06`, ~6 jours pour `FR03`, ~7 jours pour `FR05`/`FR07`/`FR09`).
+
+Par conception, `decode_2d_doc()` reste **strictement hors-ligne et fail-closed** : la bibliothèque ne déclenche **jamais** d'appel réseau implicite. Si la CRL d'une AC est expirée au moment de la vérification, la preuve de non-révocation est indisponible et `decode_2d_doc()` retourne `VerificationStatus.RESOLVER_UNAVAILABLE` (`is_valid=False`).
+
+Pour maintenir les CRLs à jour en production **sans écrire sur le disque** (compatible systèmes de fichiers en lecture seule / conteneurs durcis), la bibliothèque expose une API explicite, opt-in et thread-safe :
+
+- `refresh_default_crls(...)` (ou `resolver.refresh_crls(...)`) : télécharge les CRLs depuis les URLs *CRL Distribution Points* des certificats feuilles déjà validés, vérifie leur signature cryptographique contre l'AC de la TSL ainsi que leur fenêtre de validité, puis remplace atomiquement la CRL en mémoire. Un échec sur une AC (ex. AC legacy `FR01` ou panne réseau) est isolé dans `result.failed_cas` sans bloquer les autres AC et sans jamais effacer une CRL fraîche existante.
+- `resolver.get_expired_crl_cas(refresh_margin=...)` / `resolver.has_expired_crls(refresh_margin=...)` : permet de superviser la fraîcheur des CRLs en mémoire.
+
+> [!IMPORTANT]
+> **Responsabilité de l'intégrateur :** `2ddoc-parser` n'exécute jamais de tâche réseau en arrière-plan ni de rafraîchissement automatique dans `decode_2d_doc()`. L'orchestration du rafraîchissement (démarrage, tâche périodique, fallback avec cooldown) relève explicitement de l'application intégratrice.
+
+#### Les 3 mécanismes recommandés en production
+
+1. **Au démarrage (boot)** de l'application ou du worker :
+
+```python
+import datetime as dt
+import logging
+from fr_2ddoc_parser.api import refresh_default_crls
+
+logger = logging.getLogger(__name__)
+
+# Rafraîchit uniquement les CRLs expirées ou expirant dans les 24 prochaines heures
+report = refresh_default_crls(
+    timeout=15,
+    only_expired=True,
+    refresh_margin=dt.timedelta(hours=24),
+)
+logger.info(
+    "CRLs initialisées : refreshed=%s skipped=%s failed=%s expired=%s",
+    report.refreshed_cas,
+    report.skipped_fresh_cas,
+    report.failed_cas,
+    report.expired_cas,
+)
+```
+
+2. **Périodiquement en tâche de fond** (toutes les 6 à 12 heures, via `asyncio`, thread ou scheduler) :
+
+```python
+import asyncio
+import datetime as dt
+from fr_2ddoc_parser.api import refresh_default_crls
+
+
+async def crl_refresh_loop(interval_seconds: int = 6 * 3600) -> None:
+    while True:
+        # Exécution hors de l'event loop (appels HTTP bloquants)
+        await asyncio.to_thread(
+            refresh_default_crls,
+            timeout=15,
+            only_expired=True,
+            refresh_margin=dt.timedelta(hours=24),
+        )
+        await asyncio.sleep(interval_seconds)
+```
+
+3. **En fallback à la volée avec cooldown** lorsqu'un `decode_2d_doc()` retourne `VerificationStatus.RESOLVER_UNAVAILABLE` (cible uniquement l'AC concernée via `ca_ids=[ca_id]` et protège les serveurs CRL contre les rafales en cas d'AC legacy comme `FR01` ou de panne réseau) :
+
+```python
+import time
+from fr_2ddoc_parser.api import (
+    Decoded2DDoc,
+    VerificationStatus,
+    decode_2d_doc,
+    refresh_default_crls,
+)
+
+_LAST_REFRESH_ATTEMPT_BY_CA: dict[str, float] = {}
+_REFRESH_COOLDOWN_SECONDS = 300.0  # 5 minutes par AC
+
+
+def decode_with_crl_fallback(raw_2d_doc: str) -> Decoded2DDoc:
+    result = decode_2d_doc(raw_2d_doc)
+    if (
+        result.verification is not None
+        and result.verification.status == VerificationStatus.RESOLVER_UNAVAILABLE
+        and result.header.ca_id
+    ):
+        ca_id = result.header.ca_id.upper()
+        now = time.monotonic()
+        last_attempt = _LAST_REFRESH_ATTEMPT_BY_CA.get(ca_id, 0.0)
+        if now - last_attempt >= _REFRESH_COOLDOWN_SECONDS:
+            _LAST_REFRESH_ATTEMPT_BY_CA[ca_id] = now
+            refresh_report = refresh_default_crls(ca_ids=[ca_id], timeout=10)
+            if ca_id in refresh_report.refreshed_cas:
+                result = decode_2d_doc(raw_2d_doc)
+    return result
+```
+
 ## 🏗️ Architecture
 
 ```

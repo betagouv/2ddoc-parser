@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from html import unescape
@@ -49,7 +49,7 @@ from fr_2ddoc_parser.exception.exceptions import (
     UnknownCertificateError,
     UntrustedCertificateError,
 )
-from fr_2ddoc_parser.model.models import TrustListFreshness
+from fr_2ddoc_parser.model.models import CrlRefreshResult, TrustListFreshness
 
 if TYPE_CHECKING:
     local_key_resolver: KeyResolver
@@ -470,6 +470,34 @@ def extract_crl_urls_from_certs(certs: Sequence[x509.Certificate]) -> list[str]:
     return list(dict.fromkeys(urls))
 
 
+def _get_crl_number(crl: x509.CertificateRevocationList) -> int | None:
+    """Retourne le numéro de séquence de la CRL, s'il est présent."""
+    try:
+        return crl.extensions.get_extension_for_class(x509.CRLNumber).value.crl_number
+    except x509.ExtensionNotFound:
+        return None
+
+
+def _is_crl_fresh_with_margin(
+    crl: x509.CertificateRevocationList,
+    *,
+    evaluation_date: dt.date | None = None,
+    refresh_margin: dt.timedelta = dt.timedelta(0),
+) -> bool:
+    """Indique si la CRL est applicable et reste valide au-delà de ``refresh_margin``."""
+    if not is_crl_applicable(crl, evaluation_date):
+        return False
+    next_update = crl.next_update_utc
+    if next_update is None:
+        return False
+    if refresh_margin <= dt.timedelta(0):
+        return True
+    if evaluation_date is not None:
+        ref_dt = dt.datetime.combine(evaluation_date, dt.time.min, tzinfo=dt.UTC)
+        return next_update > ref_dt + refresh_margin
+    return next_update > dt.datetime.now(dt.UTC) + refresh_margin
+
+
 class KeyResolver:
     """Résout et valide une clé publique de vérification 2D-Doc depuis la TSL ANTS.
 
@@ -494,6 +522,7 @@ class KeyResolver:
         }
         self._leaf_candidates: dict[tuple[str, str], list[x509.Certificate]] = {}
         self._leaf_index: dict[tuple[str, str], x509.Certificate] = {}
+        self._crl_lock = threading.RLock()
         self._crls_by_ca: dict[str, list[x509.CertificateRevocationList]] = {}
         self._crls_by_issuer: dict[str, list[x509.CertificateRevocationList]] = {}
         self._require_crls = require_crls
@@ -649,21 +678,298 @@ class KeyResolver:
             except TrustSignatureError as exc:
                 last_err = exc
         if matched_issuers:
-            self._crls_by_ca.setdefault(ca, []).append(crl)
-            for issuer_key in matched_issuers:
-                self._crls_by_issuer.setdefault(issuer_key, []).append(crl)
+            with self._crl_lock:
+                self._crls_by_ca.setdefault(ca, []).append(crl)
+                for issuer_key in matched_issuers:
+                    self._crls_by_issuer.setdefault(issuer_key, []).append(crl)
             return
         raise last_err or TrustSignatureError(
             f"CRL invalide ou non signée par l'AC {ca_id}."
         )
 
-    def _active_issuer_certificates(self) -> dict[tuple[str, str], x509.Certificate]:
-        active: dict[tuple[str, str], x509.Certificate] = {}
+    def _replace_issuer_crl(
+        self,
+        ca_id: str,
+        issuer_key: str,
+        crl: x509.CertificateRevocationList,
+    ) -> bool:
+        """Remplace la CRL si elle n'est pas plus ancienne que celle déjà chargée."""
+        ca = ca_id.upper()
+        with self._crl_lock:
+            previous = self._crls_by_issuer.get(issuer_key, [])
+            last_update = crl.last_update_utc
+            crl_number = _get_crl_number(crl)
+            for existing in previous:
+                existing_last_update = existing.last_update_utc
+                if (
+                    last_update is None
+                    or existing_last_update is None
+                    or existing_last_update < last_update
+                ):
+                    continue
+                if existing_last_update > last_update:
+                    return False
+                existing_crl_number = _get_crl_number(existing)
+                if (
+                    crl_number is not None
+                    and existing_crl_number is not None
+                    and existing_crl_number > crl_number
+                ):
+                    return False
+            self._crls_by_issuer[issuer_key] = [crl]
+            previous_ids = {id(old) for old in previous}
+            still_referenced = {
+                id(existing)
+                for other_key, other_crls in self._crls_by_issuer.items()
+                if other_key != issuer_key
+                for existing in other_crls
+            }
+            existing_ca_crls = self._crls_by_ca.get(ca, [])
+            updated_ca_crls = [
+                existing
+                for existing in existing_ca_crls
+                if id(existing) not in previous_ids or id(existing) in still_referenced
+            ]
+            updated_ca_crls.append(crl)
+            self._crls_by_ca[ca] = updated_ca_crls
+            return True
+
+    def _active_issuer_leaves(
+        self,
+    ) -> dict[tuple[str, str], tuple[x509.Certificate, list[x509.Certificate]]]:
+        """Regroupe les certificats feuilles validés par émetteur actif ``(ca_id, issuer_fp)``."""
+        groups: dict[
+            tuple[str, str], tuple[x509.Certificate, list[x509.Certificate]]
+        ] = {}
         for (ca_id, _), leaves in self._leaf_candidates.items():
             for leaf in leaves:
                 for rec, _ in self._match_ca_candidates_for_leaf(ca_id, leaf):
-                    active[(ca_id, _cert_fingerprint(rec.cert))] = rec.cert
-        return active
+                    key = (ca_id, _cert_fingerprint(rec.cert))
+                    entry = groups.setdefault(key, (rec.cert, []))
+                    entry[1].append(leaf)
+        return groups
+
+    def _active_issuer_certificates(self) -> dict[tuple[str, str], x509.Certificate]:
+        return {
+            key: ca_cert for key, (ca_cert, _) in self._active_issuer_leaves().items()
+        }
+
+    def get_expired_crl_cas(
+        self,
+        *,
+        evaluation_date: dt.date | None = None,
+        refresh_margin: dt.timedelta = dt.timedelta(0),
+    ) -> tuple[str, ...]:
+        """Retourne les ``ca_id`` triés dont au moins un émetteur actif n'a pas de CRL fraîche."""
+        if refresh_margin < dt.timedelta(0):
+            raise ValueError("refresh_margin ne peut pas être négatif.")
+        expired: set[str] = set()
+        active_issuers = self._active_issuer_certificates()
+        with self._crl_lock:
+            for ca_id, issuer_key in active_issuers:
+                crls = self._crls_by_issuer.get(issuer_key, ())
+                if not any(
+                    _is_crl_fresh_with_margin(
+                        crl,
+                        evaluation_date=evaluation_date,
+                        refresh_margin=refresh_margin,
+                    )
+                    for crl in crls
+                ):
+                    expired.add(ca_id)
+        return tuple(sorted(expired))
+
+    def has_expired_crls(
+        self,
+        *,
+        evaluation_date: dt.date | None = None,
+        refresh_margin: dt.timedelta = dt.timedelta(0),
+    ) -> bool:
+        """Indique si au moins une AC active possède une CRL absente, expirée ou proche de l'expiration."""
+        return bool(
+            self.get_expired_crl_cas(
+                evaluation_date=evaluation_date,
+                refresh_margin=refresh_margin,
+            )
+        )
+
+    def refresh_crls(
+        self,
+        *,
+        timeout: int = 15,
+        only_expired: bool = True,
+        refresh_margin: dt.timedelta = dt.timedelta(hours=24),
+        ca_ids: Iterable[str] | None = None,
+        evaluation_date: dt.date | None = None,
+    ) -> CrlRefreshResult:
+        """Rafraîchit explicitement les CRLs en mémoire pour les AC connues.
+
+        Aucun appel réseau n'est effectué tant que cette méthode n'est pas appelée
+        explicitement. Les CRLs téléchargées sont vérifiées cryptographiquement
+        contre le certificat émetteur de la TSL avant remplacement atomique en mémoire.
+        Un échec sur une AC n'empêche pas le rafraîchissement des autres AC et ne
+        supprime jamais une CRL fraîche déjà chargée.
+        """
+        if timeout <= 0:
+            raise ValueError("timeout doit être strictement positif.")
+        if refresh_margin < dt.timedelta(0):
+            raise ValueError("refresh_margin ne peut pas être négatif.")
+
+        issuer_leaves = self._active_issuer_leaves()
+        issuers_by_ca: dict[
+            str, list[tuple[str, x509.Certificate, list[x509.Certificate]]]
+        ] = {}
+        for (ca_id, issuer_key), (ca_cert, leaves) in issuer_leaves.items():
+            issuers_by_ca.setdefault(ca_id, []).append((issuer_key, ca_cert, leaves))
+
+        failed_cas: dict[str, str] = {}
+        if ca_ids is not None:
+            requested = sorted({c.strip().upper() for c in ca_ids if c and c.strip()})
+            ordered_cas: list[str] = []
+            for ca_id in requested:
+                if ca_id in issuers_by_ca:
+                    ordered_cas.append(ca_id)
+                elif ca_id not in self._ca_records:
+                    failed_cas[ca_id] = "unknown_ca"
+                    logger.warning(
+                        "Rafraîchissement CRL ignoré pour AC inconnue: %s", ca_id
+                    )
+        else:
+            ordered_cas = sorted(issuers_by_ca.keys())
+
+        refreshed_cas: list[str] = []
+        skipped_fresh_cas: list[str] = []
+
+        for ca_id in ordered_cas:
+            ca_refreshed = False
+            ca_skipped = False
+            ca_failures: list[str] = []
+
+            for issuer_key, ca_cert, leaves in issuers_by_ca[ca_id]:
+                with self._crl_lock:
+                    existing_crls = tuple(self._crls_by_issuer.get(issuer_key, ()))
+
+                if only_expired and any(
+                    _is_crl_fresh_with_margin(
+                        crl,
+                        evaluation_date=evaluation_date,
+                        refresh_margin=refresh_margin,
+                    )
+                    for crl in existing_crls
+                ):
+                    ca_skipped = True
+                    continue
+
+                crl_urls = extract_crl_urls_from_certs(leaves)
+                if not crl_urls:
+                    ca_failures.append("no_crl_distribution_point")
+                    logger.warning(
+                        "Aucune URL CRL Distribution Point trouvée pour %s/%s",
+                        ca_id,
+                        issuer_key[:12],
+                    )
+                    continue
+
+                issuer_updated = False
+                last_reason = "fetch_failed"
+                for crl_url in crl_urls:
+                    crl_bytes = _fetch_bytes(crl_url, timeout=timeout)
+                    if not crl_bytes:
+                        last_reason = "fetch_failed"
+                        continue
+                    try:
+                        crl = _load_crl_bytes(crl_bytes)
+                    except Exception as exc:  # noqa: BLE001
+                        last_reason = "invalid_crl_format"
+                        logger.warning(
+                            "CRL illisible ignorée (%s/%s): %s",
+                            ca_id,
+                            issuer_key[:12],
+                            exc,
+                        )
+                        continue
+                    try:
+                        validate_crl_against_ca(crl, ca_cert)
+                    except TrustSignatureError as exc:
+                        last_reason = "invalid_crl_signature"
+                        logger.warning(
+                            "CRL rejetée par validation PKI (%s/%s): %s",
+                            ca_id,
+                            issuer_key[:12],
+                            exc,
+                        )
+                        continue
+                    except (ValueError, x509.DuplicateExtension) as exc:
+                        last_reason = "invalid_crl_format"
+                        logger.warning(
+                            "CRL avec contenu ASN.1 illisible ignorée (%s/%s): %s",
+                            ca_id,
+                            issuer_key[:12],
+                            exc,
+                        )
+                        continue
+                    if not is_crl_applicable(crl, evaluation_date):
+                        last_reason = "crl_not_applicable"
+                        logger.warning(
+                            "CRL non applicable à la date d'évaluation ignorée (%s/%s)",
+                            ca_id,
+                            issuer_key[:12],
+                        )
+                        continue
+
+                    replaced = self._replace_issuer_crl(ca_id, issuer_key, crl)
+                    ca_refreshed = ca_refreshed or replaced
+                    issuer_updated = True
+                    if replaced:
+                        logger.info(
+                            "CRL rafraîchie en mémoire pour %s/%s (next_update=%s)",
+                            ca_id,
+                            issuer_key[:12],
+                            crl.next_update_utc,
+                        )
+                    else:
+                        logger.info(
+                            "CRL plus ancienne ignorée pour %s/%s (last_update=%s)",
+                            ca_id,
+                            issuer_key[:12],
+                            crl.last_update_utc,
+                        )
+                    break
+
+                if not issuer_updated:
+                    ca_failures.append(last_reason)
+                    logger.warning(
+                        "Échec du rafraîchissement CRL pour %s/%s (%s)",
+                        ca_id,
+                        issuer_key[:12],
+                        last_reason,
+                    )
+
+            if ca_refreshed:
+                refreshed_cas.append(ca_id)
+            if ca_skipped and not ca_refreshed and not ca_failures:
+                skipped_fresh_cas.append(ca_id)
+            if ca_failures:
+                failed_cas[ca_id] = ", ".join(dict.fromkeys(ca_failures))
+
+        expired_cas: list[str] = []
+        with self._crl_lock:
+            for ca_id in ordered_cas:
+                if any(
+                    not any(
+                        is_crl_applicable(crl, evaluation_date)
+                        for crl in self._crls_by_issuer.get(issuer_key, ())
+                    )
+                    for issuer_key, _, _ in issuers_by_ca[ca_id]
+                ):
+                    expired_cas.append(ca_id)
+
+        return CrlRefreshResult(
+            refreshed_cas=tuple(sorted(refreshed_cas)),
+            skipped_fresh_cas=tuple(sorted(skipped_fresh_cas)),
+            failed_cas=failed_cas,
+            expired_cas=tuple(sorted(expired_cas)),
+        )
 
     def _ensure_crl_coverage(
         self,
@@ -674,14 +980,16 @@ class KeyResolver:
         """Exige une CRL pour chaque émetteur retenu, courante si demandé."""
         missing: list[str] = []
         not_current: list[str] = []
-        for ca_id, issuer_key in self._active_issuer_certificates():
-            crls = self._crls_by_issuer.get(issuer_key, ())
-            if not crls:
-                missing.append(f"{ca_id}/{issuer_key[:12]}")
-            elif require_current and not any(
-                is_crl_applicable(crl, evaluation_date) for crl in crls
-            ):
-                not_current.append(f"{ca_id}/{issuer_key[:12]}")
+        active_issuers = self._active_issuer_certificates()
+        with self._crl_lock:
+            for ca_id, issuer_key in active_issuers:
+                crls = tuple(self._crls_by_issuer.get(issuer_key, ()))
+                if not crls:
+                    missing.append(f"{ca_id}/{issuer_key[:12]}")
+                elif require_current and not any(
+                    is_crl_applicable(crl, evaluation_date) for crl in crls
+                ):
+                    not_current.append(f"{ca_id}/{issuer_key[:12]}")
 
         if missing or not_current:
             details: list[str] = []
@@ -1088,9 +1396,12 @@ class KeyResolver:
             for matched_ca, _ in matched_cas:
                 try:
                     if self._require_crls:
-                        issuer_crls = self._crls_by_issuer.get(
-                            _cert_fingerprint(matched_ca.cert), ()
-                        )
+                        with self._crl_lock:
+                            issuer_crls = tuple(
+                                self._crls_by_issuer.get(
+                                    _cert_fingerprint(matched_ca.cert), ()
+                                )
+                            )
                         check_certificate_revocation(
                             leaf_cert,
                             issuer_crls,
@@ -1288,6 +1599,28 @@ def get_default_key_resolver() -> KeyResolver:
         _DEFAULT_RESOLVER = resolver
         _DEFAULT_RESOLVER_ENV_KEY = current_env
         return resolver
+
+
+def refresh_default_crls(
+    *,
+    timeout: int = 15,
+    only_expired: bool = True,
+    refresh_margin: dt.timedelta = dt.timedelta(hours=24),
+    ca_ids: Iterable[str] | None = None,
+    evaluation_date: dt.date | None = None,
+) -> CrlRefreshResult:
+    """Rafraîchit explicitement en mémoire les CRLs du ``KeyResolver`` par défaut.
+
+    Aucun appel réseau n'est effectué tant que cette fonction n'est pas appelée
+    explicitement par l'intégrateur.
+    """
+    return get_default_key_resolver().refresh_crls(
+        timeout=timeout,
+        only_expired=only_expired,
+        refresh_margin=refresh_margin,
+        ca_ids=ca_ids,
+        evaluation_date=evaluation_date,
+    )
 
 
 def __getattr__(name: str) -> Any:

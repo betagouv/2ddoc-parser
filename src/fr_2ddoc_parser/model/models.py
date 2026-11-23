@@ -50,6 +50,17 @@ class TrustListFreshness(str, Enum):
     UNKNOWN = "unknown"
 
 
+class CrlRefreshResult(BaseModel):
+    """Résultat immuable d'une opération de rafraîchissement des CRLs en mémoire."""
+
+    model_config = ConfigDict(frozen=True)
+
+    refreshed_cas: tuple[str, ...] = ()
+    skipped_fresh_cas: tuple[str, ...] = ()
+    failed_cas: dict[str, str] = Field(default_factory=dict)
+    expired_cas: tuple[str, ...] = ()
+
+
 class VerificationResult(BaseModel):
     """Résultat détaillé et immuable de la vérification d'un 2D-DOC."""
 

@@ -9,8 +9,10 @@ import fr_2ddoc_parser.type as _types_pkg
 from fr_2ddoc_parser.crypto.key_resolver import (
     KeyResolver,
     get_default_key_resolver,
+    refresh_default_crls,
 )
 from fr_2ddoc_parser.model.models import (
+    CrlRefreshResult,
     Decoded2DDoc,
     VerificationResult,
     VerificationStatus,
@@ -18,6 +20,15 @@ from fr_2ddoc_parser.model.models import (
 from fr_2ddoc_parser.parser.parser import parse
 from fr_2ddoc_parser.registry.registry import TypeHandler, get_handler
 from fr_2ddoc_parser.type.base import GenericDoc
+
+__all__ = [
+    "CrlRefreshResult",
+    "Decoded2DDoc",
+    "VerificationResult",
+    "VerificationStatus",
+    "decode_2d_doc",
+    "refresh_default_crls",
+]
 
 logger = logging.getLogger(__name__)
 
