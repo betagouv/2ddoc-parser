@@ -9,10 +9,14 @@ import pydantic
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.serialization import Encoding
-from cryptography.x509.oid import ExtensionOID, NameOID
+from cryptography.x509.oid import (
+    CRLEntryExtensionOID,
+    ExtensionOID,
+    NameOID,
+)
 
 from fr_2ddoc_parser.api import (
     CrlRefreshResult,
@@ -1054,19 +1058,30 @@ def test_equal_timestamp_refresh_orders_crls_by_crl_number(
         not_after=now + dt.timedelta(days=365),
         crl_urls=[crl_url],
     )
-    crl_kwargs = {
-        "last_update": now - dt.timedelta(hours=1),
-        "next_update": now + dt.timedelta(days=5),
-    }
-    older_crl = _build_crl(ca_cert, ca_key, **crl_kwargs, crl_number=10)
+    last_update = now - dt.timedelta(hours=1)
+    next_update = now + dt.timedelta(days=5)
+    older_crl = _build_crl(
+        ca_cert,
+        ca_key,
+        last_update=last_update,
+        next_update=next_update,
+        crl_number=10,
+    )
     newer_crl = _build_crl(
         ca_cert,
         ca_key,
-        **crl_kwargs,
+        last_update=last_update,
+        next_update=next_update,
         crl_number=11,
         revoked_serials=[(leaf_cert.serial_number, now - dt.timedelta(minutes=30))],
     )
-    latest_crl = _build_crl(ca_cert, ca_key, **crl_kwargs, crl_number=12)
+    latest_crl = _build_crl(
+        ca_cert,
+        ca_key,
+        last_update=last_update,
+        next_update=next_update,
+        crl_number=12,
+    )
     resolver = _make_resolver(
         ca_specs={"FR06": (ca_cert, leaf_cert, newer_crl)},
         tsl_next_update=now + dt.timedelta(days=180),
@@ -1115,13 +1130,38 @@ def test_equal_timestamp_refresh_orders_crls_by_crl_number(
     assert stored_number == 12
 
 
+@pytest.mark.parametrize(
+    "malformed_mode",
+    [
+        "invalid_encoding",
+        "duplicate_crl_extension",
+        "duplicate_revoked_entry_extension",
+    ],
+)
 def test_malformed_crl_extensions_fall_back_and_isolate_ca(
     monkeypatch: pytest.MonkeyPatch,
+    malformed_mode: str,
 ) -> None:
     now = dt.datetime.now(dt.UTC)
     ca_specs = {}
     payloads: dict[str, bytes] = {}
     expected_calls: list[str] = []
+
+    def replace_oid_and_resign(
+        der: bytes,
+        ca_key: rsa.RSAPrivateKey,
+        *,
+        original_oid: bytes,
+        duplicate_oid: bytes,
+    ) -> bytes:
+        mutated = der.replace(original_oid, duplicate_oid)
+        loaded = x509.load_der_x509_crl(mutated)
+        signature = ca_key.sign(
+            loaded.tbs_certlist_bytes,
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+        return mutated[: -len(signature)] + signature
 
     for ca_id, cert_id in (("FR01", "A001"), ("FR06", "FPE2")):
         ca_key, ca_cert = _build_ca(
@@ -1156,20 +1196,72 @@ def test_malformed_crl_extensions_fall_back_and_isolate_ca(
         )
         payloads[good_url] = fresh_crl.public_bytes(Encoding.DER)
         if ca_id == "FR01":
-            malformed_crl = (
+            malformed_builder = (
                 x509.CertificateRevocationListBuilder()
                 .issuer_name(ca_cert.subject)
                 .last_update(now - dt.timedelta(hours=1))
                 .next_update(now + dt.timedelta(days=5))
-                .add_extension(
+            )
+            if malformed_mode == "invalid_encoding":
+                malformed_builder = malformed_builder.add_extension(
                     x509.UnrecognizedExtension(
                         ExtensionOID.CRL_NUMBER, b"not-an-integer"
                     ),
                     critical=False,
                 )
-                .sign(ca_key, hashes.SHA256())
-            )
-            payloads[bad_url] = malformed_crl.public_bytes(Encoding.DER)
+            elif malformed_mode == "duplicate_crl_extension":
+                malformed_builder = malformed_builder.add_extension(
+                    x509.CRLNumber(10), critical=False
+                ).add_extension(
+                    x509.UnrecognizedExtension(
+                        CRLEntryExtensionOID.CRL_REASON, b"\x02\x01\x0b"
+                    ),
+                    critical=False,
+                )
+            else:
+                revoked_certificate = (
+                    x509.RevokedCertificateBuilder()
+                    .serial_number(leaf_cert.serial_number)
+                    .revocation_date(now - dt.timedelta(minutes=30))
+                    .add_extension(
+                        x509.UnrecognizedExtension(
+                            CRLEntryExtensionOID.CRL_REASON, b"\x02\x01\x0b"
+                        ),
+                        critical=False,
+                    )
+                    .add_extension(
+                        x509.UnrecognizedExtension(
+                            ExtensionOID.CRL_NUMBER, b"\x02\x01\x0c"
+                        ),
+                        critical=False,
+                    )
+                    .build()
+                )
+                malformed_builder = malformed_builder.add_revoked_certificate(
+                    revoked_certificate
+                )
+            malformed_der = malformed_builder.sign(
+                ca_key, hashes.SHA256()
+            ).public_bytes(Encoding.DER)
+            crl_number_oid = b"\x06\x03\x55\x1d\x14"
+            crl_reason_oid = b"\x06\x03\x55\x1d\x15"
+            if malformed_mode == "duplicate_crl_extension":
+                malformed_der = replace_oid_and_resign(
+                    malformed_der,
+                    ca_key,
+                    original_oid=crl_reason_oid,
+                    duplicate_oid=crl_number_oid,
+                )
+            elif malformed_mode == "duplicate_revoked_entry_extension":
+                malformed_der = replace_oid_and_resign(
+                    malformed_der,
+                    ca_key,
+                    original_oid=crl_number_oid,
+                    duplicate_oid=crl_reason_oid,
+                )
+            loaded_malformed = x509.load_der_x509_crl(malformed_der)
+            assert loaded_malformed.is_signature_valid(ca_key.public_key())
+            payloads[bad_url] = malformed_der
             expected_calls.extend([bad_url, good_url])
         else:
             expected_calls.append(good_url)

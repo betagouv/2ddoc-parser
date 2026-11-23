@@ -899,7 +899,7 @@ class KeyResolver:
                             exc,
                         )
                         continue
-                    except ValueError as exc:
+                    except (ValueError, x509.DuplicateExtension) as exc:
                         last_reason = "invalid_crl_format"
                         logger.warning(
                             "CRL avec contenu ASN.1 illisible ignorée (%s/%s): %s",
