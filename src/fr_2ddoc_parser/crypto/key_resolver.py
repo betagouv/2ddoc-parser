@@ -684,11 +684,18 @@ class KeyResolver:
         ca_id: str,
         issuer_key: str,
         crl: x509.CertificateRevocationList,
-    ) -> None:
-        """Remplace atomiquement la CRL en mémoire pour un certificat émetteur donné."""
+    ) -> bool:
+        """Remplace la CRL si elle n'est pas plus ancienne que celle déjà chargée."""
         ca = ca_id.upper()
         with self._crl_lock:
             previous = self._crls_by_issuer.get(issuer_key, [])
+            last_update = crl.last_update_utc
+            if last_update is not None and any(
+                existing.last_update_utc is not None
+                and existing.last_update_utc > last_update
+                for existing in previous
+            ):
+                return False
             self._crls_by_issuer[issuer_key] = [crl]
             previous_ids = {id(old) for old in previous}
             still_referenced = {
@@ -705,6 +712,7 @@ class KeyResolver:
             ]
             updated_ca_crls.append(crl)
             self._crls_by_ca[ca] = updated_ca_crls
+            return True
 
     def _active_issuer_leaves(
         self,
@@ -880,15 +888,23 @@ class KeyResolver:
                         )
                         continue
 
-                    self._replace_issuer_crl(ca_id, issuer_key, crl)
-                    ca_refreshed = True
+                    replaced = self._replace_issuer_crl(ca_id, issuer_key, crl)
+                    ca_refreshed = ca_refreshed or replaced
                     issuer_updated = True
-                    logger.info(
-                        "CRL rafraîchie en mémoire pour %s/%s (next_update=%s)",
-                        ca_id,
-                        issuer_key[:12],
-                        crl.next_update_utc,
-                    )
+                    if replaced:
+                        logger.info(
+                            "CRL rafraîchie en mémoire pour %s/%s (next_update=%s)",
+                            ca_id,
+                            issuer_key[:12],
+                            crl.next_update_utc,
+                        )
+                    else:
+                        logger.info(
+                            "CRL plus ancienne ignorée pour %s/%s (last_update=%s)",
+                            ca_id,
+                            issuer_key[:12],
+                            crl.last_update_utc,
+                        )
                     break
 
                 if not issuer_updated:

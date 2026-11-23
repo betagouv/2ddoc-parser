@@ -935,6 +935,104 @@ def test_concurrent_refresh_and_verification_is_thread_safe(
     assert errors == []
 
 
+def test_concurrent_refresh_does_not_replace_newer_crl_with_older(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = dt.datetime.now(dt.UTC)
+    ca_key, ca_cert = _build_ca(
+        "CA FR06",
+        not_before=now - dt.timedelta(days=365),
+        not_after=now + dt.timedelta(days=365),
+    )
+    crl_url = "https://crl.example.gouv.fr/fr06.crl"
+    leaf_key, leaf_cert = _build_leaf(
+        "FPE2",
+        ca_cert,
+        ca_key,
+        not_before=now - dt.timedelta(days=30),
+        not_after=now + dt.timedelta(days=365),
+        crl_urls=[crl_url],
+    )
+    initial_crl = _build_crl(
+        ca_cert,
+        ca_key,
+        last_update=now - dt.timedelta(hours=3),
+        next_update=now + dt.timedelta(days=4),
+    )
+    older_crl = _build_crl(
+        ca_cert,
+        ca_key,
+        last_update=now - dt.timedelta(hours=2),
+        next_update=now + dt.timedelta(days=5),
+    )
+    newer_crl = _build_crl(
+        ca_cert,
+        ca_key,
+        last_update=now - dt.timedelta(hours=1),
+        next_update=now + dt.timedelta(days=6),
+        revoked_serials=[(leaf_cert.serial_number, now - dt.timedelta(minutes=30))],
+    )
+    resolver = _make_resolver(
+        ca_specs={"FR06": (ca_cert, leaf_cert, initial_crl)},
+        tsl_next_update=now + dt.timedelta(days=180),
+    )
+    raw_doc = _build_signed_2ddoc(
+        ca_id="FR06",
+        cert_id="FPE2",
+        issue_date=now.date(),
+        signature_date=now.date(),
+        private_key=leaf_key,
+    )
+
+    old_started = threading.Event()
+    release_old = threading.Event()
+    errors: list[Exception] = []
+    results: dict[str, CrlRefreshResult] = {}
+
+    def fake_fetch(url: str, timeout: int = 10) -> bytes:
+        if threading.current_thread().name == "old-fetch":
+            old_started.set()
+            assert release_old.wait(timeout=5)
+            return older_crl.public_bytes(Encoding.DER)
+        return newer_crl.public_bytes(Encoding.DER)
+
+    monkeypatch.setattr(key_resolver_mod, "_fetch_bytes", fake_fetch)
+
+    def refresh() -> None:
+        try:
+            results[threading.current_thread().name] = resolver.refresh_crls(
+                only_expired=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    old_thread = threading.Thread(target=refresh, name="old-fetch")
+    new_thread = threading.Thread(target=refresh, name="new-fetch")
+    old_thread.start()
+    try:
+        assert old_started.wait(timeout=5)
+        new_thread.start()
+        new_thread.join(timeout=10)
+        assert not new_thread.is_alive()
+    finally:
+        release_old.set()
+        old_thread.join(timeout=10)
+        if new_thread.ident is not None:
+            new_thread.join(timeout=10)
+
+    assert not old_thread.is_alive()
+    assert errors == []
+    assert results["old-fetch"].refreshed_cas == ()
+    assert results["new-fetch"].refreshed_cas == ("FR06",)
+
+    issuer_key = key_resolver_mod._cert_fingerprint(ca_cert)
+    stored_crl = resolver._crls_by_issuer[issuer_key][0]
+    assert stored_crl.last_update_utc == newer_crl.last_update_utc
+    decoded = decode_2d_doc(raw_doc, key_resolver=resolver)
+    assert decoded.verification is not None
+    assert decoded.verification.status == VerificationStatus.CERT_REVOKED
+
+
 def test_crl_refresh_result_is_frozen_and_validates_arguments() -> None:
     res = CrlRefreshResult(refreshed_cas=("FR06",))
     with pytest.raises(pydantic.ValidationError):
